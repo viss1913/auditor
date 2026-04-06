@@ -271,10 +271,18 @@ function App() {
         method: 'POST',
         body: formData
       });
-      if (!response.ok) throw new Error('Ошибка связи с AI');
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const msg = data.error || data.message || `HTTP ${response.status}`;
+        if (data.errors?.length) {
+          alert('Ошибка AI: ' + msg + '\n' + data.errors.join('\n'));
+        } else {
+          alert('Ошибка AI: ' + msg);
+        }
+        return;
+      }
       setAiRule(data.rule);
-      setAiPreview(data.preview);
+      setAiPreview(data.preview || '');
     } catch (error) {
       alert('Ошибка AI: ' + error.message);
     } finally {
@@ -293,7 +301,10 @@ function App() {
 
     try {
       const response = await fetch('http://localhost:3001/upload', { method: 'POST', body: formData });
-      if (!response.ok) throw new Error('Ошибка парсинга');
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}));
+        throw new Error(errBody.error || 'Ошибка парсинга');
+      }
       const data = await response.json();
       setUkData(data);
       alert(`Успех! Спарсили ${data.length} записей через AI!`);
@@ -612,7 +623,10 @@ function App() {
         {page === PAGE.OPIF_UK && sourceMode === 'ai' && (
         <div className="panel animate-in">
           <h2>ИИ Парсинг УК (Qwen)</h2>
-          <p className="hint">Загрузите файл карточки счёта УК и опишите, какие данные нужно извлечь (счета Дт/Кт, период).</p>
+          <div className="hint" style={{ background: 'rgba(251, 191, 36, 0.12)', border: '1px solid rgba(251, 191, 36, 0.35)', padding: '12px 14px', borderRadius: '8px', marginBottom: '1rem' }}>
+            Умный парсер ожидает <strong>ту же структуру Excel</strong>, что и обычная загрузка УК (карточка счёта: дата в первом столбце, показатель «БУ», дебет/кредит и аналитика на фиксированных колонках). ИИ задаёт только <strong>фильтры</strong> (префиксы счетов Дт/Кт, диапазон дат) и подпись операции — он <strong>не перестраивает</strong> таблицу под другой шаблон выгрузки.
+          </div>
+          <p className="hint">Загрузите такой файл и опишите счета Дт/Кт и период — модель сформирует JSON-правило для этих фильтров.</p>
 
           <div style={{ marginTop: '1.5rem' }}>
             <input type="file" onChange={e => setAiUkFiles(Array.from(e.target.files))} style={{ marginBottom: '1rem' }} />

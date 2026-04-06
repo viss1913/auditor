@@ -124,8 +124,38 @@ npm run dev
 
 | Файл | Что делает |
 |------|-----------|
-| `server/smart_parse_uk.js` | Функция `smartParseUK()` — парсит Excel УК по JSON-правилам (debit_account, credit_account, date_start, date_end). Используется когда при загрузке передаётся `ruleJson` |
-| `server/ai_parser_api.js` | API для работы с Qwen (OpenRouter). `getExcelPreview()` берёт первые 20 строк Excel, отправляет в нейросеть, получает JSON-правило для `smartParseUK`. Эндпоинт: `POST /api/ai/generate-rule-from-file` |
+| `server/parse_uk.js` | `parseUK()` — стандартный парсинг карточки счёта УК (Дт 58.01 / Кт 76), без JSON-правил |
+| `server/smart_parse_uk.js` | `smartParseUK()` — тот же **макет** таблицы, что и `parseUK`, но отбор строк по JSON-правилу |
+| `server/uk_rule_validate.js` | Проверка JSON перед парсингом и после ответа LLM (`validateUkRuleJson`, `parseAndValidateUkRuleJsonString`) |
+| `server/ai_parser_api.js` | OpenRouter/Qwen: превью Excel → JSON-правило. `POST /api/ai/generate-rule-from-file` |
+
+#### Контракт JSON-правила для умного парсинга УК
+
+Файл Excel должен совпадать по структуре с **типовой карточкой счёта** (как для обычной загрузки УК): первые 7 строк пропускаются; дата операции в колонке 0 (`ДД.ММ.ГГГГ`); показатель в колонке 5 (`БУ` или пусто); дебет в 6, кредит в 9; аналитика (название / рег. номер) в 3; сумма в 7; следующая строка с показателем `Кол.` и количеством в 7 дополняет предыдущую запись.
+
+**Из JSON реально используются только:**
+
+| Поле | Назначение |
+|------|------------|
+| `conditions.debit_account` | Строка-префикс: дебет должен **начинаться** с этого значения (например `58.01`) |
+| `conditions.credit_account` | Префикс для кредита (например `76`) |
+| `conditions.date_start` / `date_end` | Фильтр по дате из колонки 0, формат `YYYY-MM-DD` |
+| `operation_type` | Подпись операции вместо значения по умолчанию «Умная Операция» |
+
+Любые другие ключи в ответе модели (в т.ч. `extract`, карты колонок) **игнорируются** до отдельной доработки парсера.
+
+При загрузке с невалидным `ruleJson` сервер отвечает **400** с текстом ошибок; при генерации правила, если JSON от модели не прошёл проверку — **422**.
+
+**Ручная проверка:** сгенерировать правило → «Запустить парсинг» на том же файле → сравнить число строк с ожиданием; для правила, эквивалентного Дт `58.01` / Кт `76`, результат должен быть сопоставим с обычным `parseUK` на том же файле.
+
+**Будущее расширение (не в текущем контракте):** поддержка других раскладок колонок (например `column_map` в JSON) или отдельная функция парсинга под другой шаблон выгрузки — только по отдельному ТЗ.
+
+#### Тесты
+
+```powershell
+cd server
+node --test smart_parse_uk.test.js
+```
 
 ### Аудит
 
@@ -168,8 +198,8 @@ npm run dev
 ### Сводка: где искать логику
 
 ```
-ПАРСИНГ СТАНДАРТНЫЙ  →  server/index.js  (parseUK, parseBroker, parseDepo)
-ПАРСИНГ ПО ПРАВИЛАМ →  server/smart_parse_uk.js + server/ai_parser_api.js
+ПАРСИНГ СТАНДАРТНЫЙ  →  server/parse_uk.js + server/index.js  (parseBroker, parseDepo)
+ПАРСИНГ ПО ПРАВИЛАМ →  server/smart_parse_uk.js + server/uk_rule_validate.js + server/ai_parser_api.js
 АУДИТ                →  server/index.js  (GET /audit, GET /audit/preview)
 UI                   →  src/App.jsx
 ```

@@ -22,6 +22,8 @@ app.use(express.json());
 // Подключаем новый роутер изолированно
 const aiParserApi = require('./ai_parser_api');
 const { smartParseUK } = require('./smart_parse_uk');
+const { parseUK } = require('./parse_uk');
+const { parseAndValidateUkRuleJsonString } = require('./uk_rule_validate');
 app.use('/api', aiParserApi);
 
 const upload = multer({ dest: 'uploads/' });
@@ -76,72 +78,6 @@ const initDb = async () => {
 initDb();
 
 app.get('/ping', (req, res) => res.send('Асоль на связи!'));
-
-// Логика парсинга УК (Карточка счета)
-function parseUK(filePath) {
-    const workbook = xlsx.readFile(filePath);
-    const sheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[sheetName];
-    const data = xlsx.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
-
-    const results = [];
-    let lastEntryAwaitingQty = null;
-
-    console.log('--- Начинаю парсинг УК (v5) ---');
-
-    data.forEach((row, index) => {
-        if (index < 7) return;
-
-        const firstCol = String(row[0] || '').trim();
-        const isDate = /^\d{2}\.\d{2}\.\d{4}/.test(firstCol);
-        const pokazatel = String(row[5] || '').trim();
-
-        if (isDate && (pokazatel === 'БУ' || pokazatel === '')) {
-            const dbAcc = String(row[6] || '').trim();
-            const crAcc = String(row[9] || '').trim();
-
-            if (dbAcc.includes('58.01') && crAcc.startsWith('76')) {
-                const analytics = String(row[3] || '').trim();
-                const parts = analytics.split(',').map(s => s.trim());
-                let name = parts.slice(0, Math.max(1, parts.length - 1)).join(', ') || analytics;
-                let regNum = parts.length > 1 ? parts[parts.length - 1] : '';
-
-                let amountRaw = String(row[7] || '0').replace(/\s/g, '').replace(',', '.').replace(/[^\d.-]/g, '');
-                let amount = parseFloat(amountRaw);
-                if (isNaN(amount)) amount = 0;
-
-                const newEntry = {
-                    period: null,
-                    operationType: 'Покупка',
-                    name,
-                    regNum,
-                    isin: '',
-                    amount,
-                    quantity: 0,
-                    currency: 'RUB',
-                    registrationDate: firstCol,
-                    fee: 0,
-                    debit_account: dbAcc,
-                    credit_account: crAcc
-                };
-                results.push(newEntry);
-                lastEntryAwaitingQty = newEntry;
-            } else {
-                lastEntryAwaitingQty = null;
-            }
-        } else if (lastEntryAwaitingQty && pokazatel === 'Кол.') {
-            let qty = 0;
-            const strVal = String(row[7] || '0').replace(/\s/g, '').replace(/\u00A0/g, '').replace(',', '.');
-            const parsed = parseFloat(strVal);
-            if (!isNaN(parsed)) qty = parsed;
-
-            lastEntryAwaitingQty.quantity = qty;
-            lastEntryAwaitingQty = null; // Мы нашли количество, сбрасываем
-        }
-    });
-
-    return results;
-}
 
 // Логика парсинга Брокера (Раздел 1.2) — ВЕРСИЯ 10 (С комиссиями, датой рег. и валютой)
 function parseBroker(filePath) {
@@ -496,7 +432,15 @@ app.post('/upload', upload.array('files'), async (req, res) => {
             await client.query('DELETE FROM trades WHERE source = $1', [sourceName]);
         }
 
-        const ruleJson = req.body.ruleJson ? JSON.parse(req.body.ruleJson) : null;
+        let ruleJson = null;
+        if (req.body.ruleJson && String(req.body.ruleJson).trim() !== '') {
+            const validated = parseAndValidateUkRuleJsonString(req.body.ruleJson);
+            if (!validated.ok) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ error: validated.errors.join('; ') });
+            }
+            ruleJson = validated.rule;
+        }
 
         for (const file of req.files) {
             try { file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8'); } catch (e) { }

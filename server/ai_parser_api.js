@@ -3,6 +3,7 @@ const router = express.Router();
 const { Pool } = require('pg');
 const multer = require('multer');
 const xlsx = require('xlsx');
+const { validateUkRuleJson } = require('./uk_rule_validate');
 
 // Инициализация пула соединений
 const pool = new Pool({
@@ -73,10 +74,21 @@ router.post('/parsing-rules', async (req, res) => {
         return res.status(400).json({ error: 'project_id и rule_json обязательны' });
     }
 
+    let ruleObj;
+    try {
+        ruleObj = typeof rule_json === 'string' ? JSON.parse(rule_json) : rule_json;
+    } catch (e) {
+        return res.status(400).json({ error: 'rule_json не является корректным JSON' });
+    }
+    const validated = validateUkRuleJson(ruleObj);
+    if (!validated.ok) {
+        return res.status(400).json({ error: validated.errors.join('; ') });
+    }
+
     try {
         const result = await pool.query(
             'INSERT INTO parsing_rules (project_id, source, rule_json) VALUES ($1, $2, $3) RETURNING *',
-            [project_id, source || 'UK', rule_json]
+            [project_id, source || 'UK', JSON.stringify(validated.rule)]
         );
         res.status(201).json(result.rows[0]);
     } catch (err) {
@@ -112,29 +124,23 @@ router.post('/ai/generate-rule-from-file', upload.single('file'), async (req, re
     try {
         const sampleData = getExcelPreview(file.buffer);
 
-        const sysPrompt = `Ты - эксперт по парсингу финансовых данных из Excel (банковские выписки, карточки счетов). 
-Твоя задача: на основе фрагмента данных и запроса пользователя сгенерировать JSON правило для парсинга.
+        const sysPrompt = `Ты помогаешь настроить фильтры для парсера карточки счёта УК в Excel.
 
-ВАЖНО: 
-1. В "conditions" указывай ключи: "debit_account", "credit_account", "date_start", "date_end".
-2. Если пользователь просит диапазон дат, используй формат "YYYY-MM-DD" для "date_start" и "date_end".
-3. Если пользователь указывает счет (например "58.1"), пиши его как есть.
-4. В "extract" перечисли поля: "amount", "quantity", "period", "name", "regNum".
-5. Если пользователь просит назвать тип операции (например "покупка", "продажа" и т.д.), добавь ключ "operation_type" на верхнем уровне JSON.
+КРИТИЧЕСКИ ВАЖНО: серверный парсер НЕ меняет раскладку колонок и НЕ читает никакие поля кроме перечисленных ниже. Файл должен быть той же структуры, что и стандартная карточка (дата в 1-й колонке, счета и суммы на фиксированных позициях — как в типовой выгрузке). Ты задаёшь только фильтры по счетам, датам и подпись типа операции.
 
-Верни ТОЛЬКО валидный JSON без маркдауна.
+Сгенерируй ОДИН JSON-объект без markdown и без комментариев.
 
-Формат JSON:
-{
-  "conditions": {
-    "debit_account": "номер_счета",
-    "credit_account": "номер_счета",
-    "date_start": "ГГГГ-ММ-ДД",
-    "date_end": "ГГГГ-ММ-ДД"
-  },
-  "operation_type": "название_операции_если_указано_иначе_Умная_Операция",
-  "extract": ["amount", "quantity", "period", "name"]
-}
+Структура:
+- "conditions" (объект, можно пустой или с частью полей):
+  - "debit_account" (строка, опционально): дебет должен начинаться с этого префикса, например "58.01"
+  - "credit_account" (строка, опционально): кредит должен начинаться с этого префикса, например "76"
+  - "date_start", "date_end" (строки ГГГГ-ММ-ДД, опционально): отбор по дате операции в первой колонке
+- "operation_type" (строка, опционально): как подписать операцию в системе; если не уместно — "Умная Операция"
+
+Не добавляй ключи "extract", "columns" и любые другие — они игнорируются.
+
+Пример:
+{"conditions":{"debit_account":"58.01","credit_account":"76"},"operation_type":"Покупка"}
 `;
 
         const userMsg = `Запрос пользователя: ${prompt}\n\nФрагмент данных из Excel (tab-separated):\n${sampleData}`;
@@ -165,7 +171,16 @@ router.post('/ai/generate-rule-from-file', upload.single('file'), async (req, re
         content = content.replace(/```json/gi, '').replace(/```/g, '').trim();
 
         const jsonRule = JSON.parse(content);
-        res.json({ rule: jsonRule, preview: sampleData });
+        const validated = validateUkRuleJson(jsonRule);
+        if (!validated.ok) {
+            return res.status(422).json({
+                error: 'Модель вернула JSON, не прошедший проверку: ' + validated.errors.join('; '),
+                errors: validated.errors,
+                rawRule: jsonRule,
+                preview: sampleData,
+            });
+        }
+        res.json({ rule: validated.rule, preview: sampleData });
     } catch (err) {
         console.error('Ошибка при генерации правила Qwen:', err);
         res.status(500).json({ error: err.message });
