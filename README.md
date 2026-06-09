@@ -127,7 +127,20 @@ npm run dev
 | `server/parse_uk.js` | `parseUK()` — стандартный парсинг карточки счёта УК (Дт 58.01 / Кт 76), без JSON-правил |
 | `server/smart_parse_uk.js` | `smartParseUK()` — тот же **макет** таблицы, что и `parseUK`, но отбор строк по JSON-правилу |
 | `server/uk_rule_validate.js` | Проверка JSON перед парсингом и после ответа LLM (`validateUkRuleJson`, `parseAndValidateUkRuleJsonString`) |
-| `server/ai_parser_api.js` | OpenRouter/Qwen: превью Excel → JSON-правило. `POST /api/ai/generate-rule-from-file` |
+| `server/llm_client.js` | Клиент LLM (OpenRouter или `LLM_BASE_URL` для Ollama) |
+| `server/ai_parser_api.js` | `POST /api/ai/chat`, `POST /api/parse/preview`, `POST /api/parsing-rules` |
+| `server/smart_parse_os.js` | Парсер ОСВ / ведомости 01 → плоская таблица |
+| `src/AiMartin.jsx` | UI: диалог, загрузка Excel, превью, сохранение правил |
+
+#### AI Martin (диалог)
+
+1. Боковое меню → **AI Martin**
+2. Выбор: **УК** или **Оборотно-сальдовая ведомость**
+3. Загрузка Excel + сообщение в чат → JSON-правило + превью таблицы
+4. Уточнения в чате → обновление правила
+5. **Сохранить правило** (нужна таблица `projects` — `node server/migrate_db.js`)
+
+Переменные: см. `.env.example` (`OPENROUTER_API_KEY`, `QWEN_MODEL`, `LLM_BASE_URL`).
 
 #### Контракт JSON-правила для умного парсинга УК
 
@@ -154,7 +167,7 @@ npm run dev
 
 ```powershell
 cd server
-node --test smart_parse_uk.test.js
+npm test
 ```
 
 ### Аудит

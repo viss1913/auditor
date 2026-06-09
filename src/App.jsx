@@ -1,5 +1,10 @@
 import React, { useState, useRef, useMemo } from 'react';
 import './index.css';
+import AiMartin from './AiMartin';
+import ParserHub from './ParserHub';
+import LyubovPanel from './LyubovPanel';
+import ParserPlaceholder from './ParserPlaceholder';
+import KseniyaPanel from './KseniyaPanel';
 
 function parseDate(str) {
   if (!str) return new Date(0);
@@ -20,6 +25,7 @@ const PAGE = {
 
 function App() {
   const [page, setPage] = useState(PAGE.AI_MARTIN);
+  const [parserProfile, setParserProfile] = useState('anton');
   const [opifExpanded, setOpifExpanded] = useState(true);
   const [activeTab, setActiveTab] = useState('uk'); // для данных: uk | broker | depo | audit
   const [sourceMode, setSourceMode] = useState('classic'); // 'classic' | 'ai' — переключение УК/ИИ УК внутри раздела
@@ -340,10 +346,20 @@ function App() {
 
   const isOpifDataPage = page === PAGE.OPIF_UK || page === PAGE.OPIF_BROKER || page === PAGE.OPIF_DEPO;
 
+  const martinFullscreen = page === PAGE.AI_MARTIN;
+
   return (
-    <div className="app-layout">
+    <div className={`app-layout${martinFullscreen ? ' app-layout--martin-full' : ''}`}>
+      {!martinFullscreen && (
       <aside className="sidebar">
         <div className="sidebar-brand">BankFuture Audit</div>
+        {page === PAGE.AI_MARTIN && (
+          <ParserHub
+            variant="sidebar"
+            selectedId={parserProfile}
+            onSelect={setParserProfile}
+          />
+        )}
         <nav className="sidebar-nav">
           <button
             className={`sidebar-item ${page === PAGE.AI_MARTIN ? 'active' : ''}`}
@@ -384,8 +400,9 @@ function App() {
           <button className="sidebar-item">Выход</button>
         </div>
       </aside>
+      )}
 
-      <main className="main-content">
+      <main className={`main-content${page === PAGE.AI_MARTIN ? ' main-content--wide' : ''}${martinFullscreen ? ' main-content--anton' : ''}`}>
         <header className="main-header">
           <h1 className="main-title">BankFuture Audit</h1>
           <p className="main-tagline">Система аудита и сверки сделок по данным УК, брокера и депозитария</p>
@@ -403,18 +420,33 @@ function App() {
           </div>
         )}
 
-        {/* AI Martin — первый экран */}
+        {/* AI Martin — диалог + правила парсинга */}
         {page === PAGE.AI_MARTIN && (
-          <div className="panel">
-            <h2>AI Martin</h2>
-            <p className="hint">Ассистент для работы с данными и правилами парсинга. Задайте вопрос или перейдите в раздел УК → ИИ УК для генерации правил из файлов.</p>
-            <div className="panel" style={{ background: '#f8fafc', padding: '1.5rem', border: '1px solid var(--border-color)' }}>
-              <p style={{ marginBottom: '1rem', color: 'var(--text-secondary)' }}>Сообщение от Martin:</p>
-              <p style={{ marginBottom: '1.5rem' }}>Здравствуйте. Я помогу с анализом отчётности и настройкой парсинга. Выберите раздел «Аудит ОПИФ» → «УК» → «ИИ УК» для загрузки файла и генерации правил.</p>
-              <label className="hint">Введите сообщение:</label>
-              <textarea className="search-input" style={{ minHeight: '100px', marginTop: '0.5rem' }} placeholder="В разработке: диалог с AI Martin" readOnly />
-            </div>
-          </div>
+          <>
+            {parserProfile === 'anton' && (
+              <AiMartin
+                onUkParsed={(data) => {
+                  setUkData(data);
+                  setActiveTab('uk');
+                }}
+              />
+            )}
+            {parserProfile === 'lyubov' && (
+              <LyubovPanel
+                onNavigate={(key) => {
+                  const map = {
+                    opif_uk: PAGE.OPIF_UK,
+                    opif_broker: PAGE.OPIF_BROKER,
+                    opif_depo: PAGE.OPIF_DEPO,
+                    opif_audit: PAGE.OPIF_AUDIT,
+                  };
+                  if (map[key]) setPage(map[key]);
+                }}
+              />
+            )}
+            {parserProfile === 'pavel' && <ParserPlaceholder profileId="pavel" />}
+            {parserProfile === 'kseniya' && <KseniyaPanel />}
+          </>
         )}
 
         {/* Исходные файлы — заглушка */}
@@ -622,9 +654,9 @@ function App() {
         {/* ===== ИИ УК (внутри раздела УК) ===== */}
         {page === PAGE.OPIF_UK && sourceMode === 'ai' && (
         <div className="panel animate-in">
-          <h2>ИИ Парсинг УК (Qwen)</h2>
+          <h2>ИИ Парсинг УК</h2>
           <div className="hint" style={{ background: 'rgba(251, 191, 36, 0.12)', border: '1px solid rgba(251, 191, 36, 0.35)', padding: '12px 14px', borderRadius: '8px', marginBottom: '1rem' }}>
-            Умный парсер ожидает <strong>ту же структуру Excel</strong>, что и обычная загрузка УК (карточка счёта: дата в первом столбце, показатель «БУ», дебет/кредит и аналитика на фиксированных колонках). ИИ задаёт только <strong>фильтры</strong> (префиксы счетов Дт/Кт, диапазон дат) и подпись операции — он <strong>не перестраивает</strong> таблицу под другой шаблон выгрузки.
+            Рекомендуем <strong>AI Martin</strong> в боковом меню: диалог, превью и правки правила. Здесь — быстрый режим только для УК.
           </div>
           <p className="hint">Загрузите такой файл и опишите счета Дт/Кт и период — модель сформирует JSON-правило для этих фильтров.</p>
 

@@ -1,0 +1,8 @@
+{
+  "source": "os_excel",
+  "variant": "08_osv",
+  "source_label": "ОСВ по счёту 08",
+  "conditions": {
+    "sheet_name": "Исходная выгрузка 08"
+  }
+}

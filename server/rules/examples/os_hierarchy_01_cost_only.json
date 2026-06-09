@@ -1,0 +1,38 @@
+{
+  "rule_schema_version": 2,
+  "meta": {
+    "name": "Ведомость ОС — стоимость начало/конец без амортизации",
+    "source_type": "excel",
+    "sheet_name": "Исходная выгрузка 01",
+    "profile_hint": "os_depreciation_01"
+  },
+  "layout": {
+    "layout_type": "hierarchy_rows",
+    "name_column": 0
+  },
+  "hierarchy": {
+    "leaf_rules": {
+      "min_name_length": 20,
+      "inventory_patterns": ["\\d{2}\\.\\d{2}\\.\\d{4}", "инв\\.?", "№\\s*[\\dA-Z-]", "80-\\d+"],
+      "skip_name_patterns": ["^ОП\\s", "^РТК\\s", "^КЦ$", "^Итого"]
+    }
+  },
+  "columns": [
+    { "target": "Юрлицо", "source": { "type": "entity_from_header" } },
+    { "target": "Группа", "source": { "type": "hierarchy_field", "field": "group" } },
+    { "target": "Подразделение", "source": { "type": "hierarchy_field", "field": "subdivision" } },
+    { "target": "ОС", "source": { "type": "hierarchy_field", "field": "asset_name" } },
+    {
+      "target": "2024 - стоимость на начало",
+      "source": { "type": "metric", "measure": "cost_open", "period_suffix": "{year} - стоимость на начало" }
+    },
+    {
+      "target": "2024 - стоимость на конец",
+      "source": { "type": "metric", "measure": "cost_close", "period_suffix": "{year} - стоимость на конец" }
+    }
+  ],
+  "filters": {
+    "skip_row_patterns": ["^Итого", "^Группа учета", "^Подразделение$", "^Основное средство", "^Ведомость", "^Выводимые"]
+  },
+  "output": { "shape": "wide" }
+}

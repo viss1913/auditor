@@ -1,0 +1,13 @@
+{
+  "source": "os_excel",
+  "variant": "01_flat",
+  "source_label": "Исходная выгрузка → плоская таблица (Группа | ОП | ОС | годы)",
+  "conditions": {
+    "sheet_name": "Исходная выгрузка 01"
+  },
+  "leaf_detection": {
+    "min_name_length": 20,
+    "inventory_patterns": ["\\d{2}\\.\\d{2}\\.\\d{4}", "инв\\.?", "№\\s*[\\dA-Z-]", "80-\\d+", "\\d{6,}"],
+    "skip_name_patterns": ["^ОП\\s", "^РТК\\s", "^КЦ$", "^Итого"]
+  }
+}

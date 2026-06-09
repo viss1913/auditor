@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test smart_parse_uk.test.js"
+    "test": "node --test smart_parse_uk.test.js smart_parse_os.test.js smart_parse_uk.e2e.test.js",
+    "parse:os-demo": "node scripts/parse_os_demo.js"
   },
   "keywords": [],
   "author": "",

@@ -6,7 +6,6 @@ const path = require('path');
 const dotenv = require('dotenv');
 const { Pool } = require('pg');
 const fs = require('fs');
-const pdfParse = require('pdf-parse');
 
 // Пробуем оба пути — из server/ и из корня
 const path1 = path.resolve(__dirname, '../.env');
@@ -17,14 +16,19 @@ console.log('[ENV PATH]', path1, '| DB_HOST:', process.env.DB_HOST);
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
 
 // Подключаем новый роутер изолированно
 const aiParserApi = require('./ai_parser_api');
-const { smartParseUK } = require('./smart_parse_uk');
+const kseniyaApi = require('./kseniya_api');
 const { parseUK } = require('./parse_uk');
-const { parseAndValidateUkRuleJsonString } = require('./uk_rule_validate');
+const { validateParsingRuleV2 } = require('./parsing_rule_v2_validate');
+const { runParseEngine } = require('./parse_engine');
+const { V2_ONLY_MSG } = require('./parse_preview');
+const { parseBroker } = require('./parse_broker');
+const { parseDepo } = require('./parse_depo');
 app.use('/api', aiParserApi);
+app.use('/api', kseniyaApi);
 
 const upload = multer({ dest: 'uploads/' });
 
@@ -69,6 +73,9 @@ const initDb = async () => {
         ];
         for (let q of alterQueries) await pool.query(q);
 
+        const { PARSE_SNAPSHOT_DDL } = require('./parse_snapshot_schema');
+        await pool.query(PARSE_SNAPSHOT_DDL);
+
         console.log('✅ База данных готова (таблицы проверены)');
     } catch (err) {
         console.error('❌ Ошибка инициализации БД:', err.message);
@@ -79,347 +86,57 @@ initDb();
 
 app.get('/ping', (req, res) => res.send('Асоль на связи!'));
 
-// Логика парсинга Брокера (Раздел 1.2) — ВЕРСИЯ 10 (С комиссиями, датой рег. и валютой)
-function parseBroker(filePath) {
-    const workbook = xlsx.readFile(filePath, { cellDates: true });
-    const sheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[sheetName];
-    const data = xlsx.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
-
-    const results = [];
-    let inSection = false;
-
-    console.log(`--- Парсинг Брокера (v10) --- Файл: ${filePath}`);
-
-    data.forEach((row, index) => {
-        if (!Array.isArray(row)) return;
-        const rowText = row.map(v => String(v)).join(' ').toLowerCase();
-
-        // Поиск начала раздела 1.2
-        if (!inSection && rowText.includes('1.2.') && rowText.includes('сделки') && rowText.includes('не исполнены')) {
-            inSection = true;
-            return;
-        }
-
-        // Поиск конца раздела
-        if (inSection && (rowText.includes('1.3.') || rowText.includes('раздел 2'))) {
-            const startText = row.slice(0, 10).join(' ').toLowerCase();
-            if (startText.includes('1.3.') || startText.includes('раздел 2') || startText.includes('2.')) {
-                inSection = false;
-            }
-        }
-
-        if (inSection) {
-            let dateStr = '';
-            let dateIdx = -1;
-
-            // Ищем дату в первых 5 колонках
-            for (let i = 0; i < Math.min(row.length, 5); i++) {
-                const val = row[i];
-                if (!val) continue;
-                if (val instanceof Date) {
-                    dateStr = val.toLocaleDateString('ru-RU');
-                    dateIdx = i;
-                    break;
-                }
-                const sval = String(val).trim();
-                const m = sval.match(/^(\d{2}\.\d{2}\.\d{4})/);
-                if (m) {
-                    dateStr = m[1];
-                    dateIdx = i;
-                    break;
-                }
-            }
-
-            if (dateStr && dateIdx !== -1) {
-                // Ищем тип операции
-                let operation = '';
-                let opIdx = -1;
-                for (let i = dateIdx + 1; i < Math.min(dateIdx + 6, row.length); i++) {
-                    const val = String(row[i] || '').trim();
-                    const valLow = val.toLowerCase();
-                    if (valLow.includes('покупка') || valLow.includes('продажа') || valLow.includes('репо')) {
-                        operation = val;
-                        opIdx = i;
-                        break;
-                    }
-                }
-
-                if (operation && opIdx !== -1) {
-                    let longCells = [];
-                    for (let i = opIdx + 1; i < row.length; i++) {
-                        const val = String(row[i] || '').trim();
-                        if (val.length > 3) {
-                            longCells.push({ val: val.replace(/\r?\n|\r/g, ' ').replace(/\s+/g, ' ').trim(), idx: i });
-                        }
-                    }
-
-                    let securityInfo = '';
-                    let infoIdx = -1;
-
-                    // Стратегия 1: ищем ячейку с явным ISIN
-                    for (const cell of longCells) {
-                        if (/ISIN/i.test(cell.val) || /[A-Z]{2}[A-Z0-9]{10}/.test(cell.val) || /\d[\dА-Яа-яA-Za-z]{0,3}-\d{2}-\d{4,6}/.test(cell.val)) {
-                            securityInfo = cell.val;
-                            infoIdx = cell.idx;
-                            break;
-                        }
-                    }
-
-                    // Стратегия 2: если ISIN не найден, берём 2-ю длинную ячейку
-                    if (!securityInfo && longCells.length >= 2) {
-                        securityInfo = longCells[1].val;
-                        infoIdx = longCells[1].idx;
-                    }
-                    if (!securityInfo && longCells.length === 1) {
-                        securityInfo = longCells[0].val;
-                        infoIdx = longCells[0].idx;
-                    }
-
-                    if (securityInfo) {
-                        const isinMatch = securityInfo.match(/ISIN[:\s]+([A-Z]{2}[A-Z0-9]{10})/i) || securityInfo.match(/\b([A-Z]{2}[A-Z0-9]{10})\b/);
-                        const isin = isinMatch ? isinMatch[1] : '';
-
-                        // Паттерн 1: "1-01-12345-A" (с дефисами)
-                        const regMatch = securityInfo.match(/(\d[\dА-Яа-яA-Za-z]{0,3}-\d{2}-\d{4,6}-[А-ЯA-Z\d-]+)/i);
-                        // Паттерн 2: "10100963B" — цифры + буква (без дефисов)
-                        const regMatchShort = !regMatch ? securityInfo.match(/\b(\d{7,9}[A-Z])\b/) : null;
-                        const regNum = regMatch ? regMatch[1] : (regMatchShort ? regMatchShort[1] : '');
-                        const regMatchUsed = regMatch || regMatchShort;
-
-                        let name = securityInfo;
-                        if (isinMatch) name = name.split(isinMatch[0])[0];
-                        if (regMatchUsed) name = name.replace(regMatchUsed[0], '');
-                        name = name.replace(/ISIN/gi, '').replace(/[№\u2116]\s*/g, '').trim();
-                        name = name.replace(/[\s,;|]+$/, '').trim();
-
-                        // Извлекаем числа для Кол-ва и Суммы
-                        let foundNums = [];
-                        for (let i = infoIdx + 1; i < row.length; i++) {
-                            const val = row[i];
-                            if (typeof val === 'number' && val !== 0) foundNums.push(val);
-                            else if (val) {
-                                const n = parseFloat(String(val).replace(/\s/g, '').replace(',', '.'));
-                                if (!isNaN(n) && n !== 0) foundNums.push(n);
-                            }
-                        }
-
-                        const quantity = foundNums[0] || 0;
-                        const amount = foundNums[3] || foundNums[foundNums.length - 1] || 0;
-
-                        // Ищем Валюту, Даты регистрации/оплаты и Комиссии
-                        let currency = '';
-                        let currencyIdx = -1;
-                        for (let i = infoIdx + 1; i < row.length; i++) {
-                            if (['RUB', 'USD', 'EUR', 'CNY'].includes(String(row[i]).trim().toUpperCase())) {
-                                currency = String(row[i]).trim().toUpperCase();
-                                currencyIdx = i;
-                                break;
-                            }
-                        }
-
-                        let registrationDate = '';
-                        let regDateIdx = -1;
-                        if (currencyIdx !== -1) {
-                            for (let i = currencyIdx + 1; i < row.length; i++) {
-                                const val = row[i];
-                                if (!val) continue;
-                                if (val instanceof Date) {
-                                    registrationDate = val.toLocaleDateString('ru-RU');
-                                    // Пропускаем дату оплаты, которая идет следом
-                                    for (let j = i + 1; j < row.length; j++) {
-                                        if (row[j] instanceof Date || /^(\d{2}\.\d{2}\.\d{4})/.test(String(row[j]).trim())) {
-                                            regDateIdx = j; // Индекс последней найденной даты (дата оплаты)
-                                            break;
-                                        }
-                                    }
-                                    if (regDateIdx === -1) regDateIdx = i;
-                                    break;
-                                }
-                                const sval = String(val).trim();
-                                const m = sval.match(/^(\d{2}\.\d{2}\.\d{4})/);
-                                if (m) {
-                                    registrationDate = m[1];
-                                    // Ищем вторую дату
-                                    for (let j = i + 1; j < row.length; j++) {
-                                        if (row[j] instanceof Date || /^(\d{2}\.\d{2}\.\d{4})/.test(String(row[j]).trim())) {
-                                            regDateIdx = j;
-                                            break;
-                                        }
-                                    }
-                                    if (regDateIdx === -1) regDateIdx = i;
-                                    break;
-                                }
-                            }
-                        }
-
-                        // Ищем комиссии после дат (все числовые значения суммируем)
-                        let fee = 0;
-                        if (regDateIdx !== -1) {
-                            let totalFee = 0;
-                            let feeFound = false;
-
-                            // Комиссии могут быть очень далеко (из-за пустых столбцов объединения)
-                            // Идем прямо до конца строки, пока не встретим стоп-слова (Портфель/Субсчет)
-                            for (let i = regDateIdx + 1; i < row.length; i++) {
-                                const val = row[i];
-                                if (val === undefined || val === null || val === '') continue;
-
-                                const svalText = String(val).trim().toUpperCase();
-
-                                // Стоп-слова: дошли до Портфеля (1F018...)
-                                if (svalText.includes('1F018') || svalText.includes('ПОРТФЕЛЬ')) {
-                                    break;
-                                }
-
-                                // Пропускаем названия валют комиссий и текст РЕПО
-                                if (['RUB', 'USD', 'EUR', 'CNY'].includes(svalText) || svalText.includes('РЕПО') || svalText.includes('НОМЕР')) {
-                                    continue;
-                                }
-
-                                if (typeof val === 'number') {
-                                    if (val < 1000000) {
-                                        totalFee += val;
-                                        feeFound = true;
-                                    } else {
-                                        continue; // Это номер сделки (>1 млн), пропускаем
-                                    }
-                                } else {
-                                    const strNum = String(val).replace(/\s/g, '').replace(',', '.');
-                                    const n = parseFloat(strNum);
-                                    if (!isNaN(n) && typeof val !== 'boolean') {
-                                        if (n < 1000000) {
-                                            totalFee += n;
-                                            feeFound = true;
-                                        } else {
-                                            continue; // Номер сделки
-                                        }
-                                    }
-                                }
-                            }
-                            if (feeFound) fee = totalFee;
-                        }
-
-                        console.log(`[PARSED] ${dateStr} | ${operation} | ${name} | regDate=${registrationDate} | curr=${currency} | fee=${fee}`);
-
-                        results.push({
-                            period: registrationDate || dateStr,
-                            operationType: operation,
-                            name,
-                            regNum,
-                            isin,
-                            amount,
-                            quantity,
-                            currency,
-                            registrationDate,
-                            fee,
-                            debit_account: '',
-                            credit_account: ''
-                        });
-                    }
-                }
-            }
-        }
-    });
-
-    return results;
-}
-
-// Новая логика парсинга ДЕПО (PDF)
-async function parseDepo(filePath, fileName = '') {
-    if (!fs.existsSync(filePath)) return [];
-
-    const dataBuffer = fs.readFileSync(filePath);
-    const pdfData = await pdfParse(dataBuffer);
-
-    const lines = pdfData.text.split('\n').map(l => l.trim()).filter(l => l !== '');
-    const results = [];
-
-    let accountFromFilename = '';
-    const match = fileName.match(/\(([^)]+)\)/);
-    if (match) {
-        accountFromFilename = match[1].trim();
-    } else {
-        const fallbackMatch = fileName.match(/\b(\d+)\b/);
-        if (fallbackMatch) accountFromFilename = fallbackMatch[1].trim();
-    }
-    console.log(`[DEPO PARSE] fileName: "${fileName}", account extracted: "${accountFromFilename}"`);
-
-    let currentName = '';
-    let currentRegNum = '';
-    let currentIsin = '';
-
-    console.log(`--- Парсинг ДЕПО (PDF) --- Файл: ${filePath}`);
-
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-
-        // Ищем название бумаги
-        if (line.includes('(Наименование эмитента, тип ценных бумаг)')) {
-            currentName = lines[i - 1] || '';
-            continue;
-        }
-
-        // Ищем рег номер или ISIN
-        if (line.includes('(Номер гос. регистрации выпуска/ISIN-код/номер ПДУ/Номер закладной)')) {
-            const val = (lines[i - 1] || '').trim();
-            // ISIN обычно 12 символов (RU000...), Рег номер длиннее или с дефисами
-            if (/^[A-Z0-9]{12}$/.test(val)) {
-                currentIsin = val;
-                currentRegNum = '';
-            } else {
-                currentRegNum = val;
-                currentIsin = '';
-            }
-            continue;
-        }
-
-        // Ищем строки операций
-        if (line === 'Зачисление ЦБ' || line === 'Списание ЦБ') {
-            const opType = line;
-            // Дата обычно строкой выше: "11.03.2025 25031104310"
-            const prevLine = lines[i - 1] || '';
-            const dateMatch = prevLine.match(/^(\d{2}\.\d{2}\.\d{4})/);
-            const dateStr = dateMatch ? dateMatch[1] : '';
-
-            // Ищем количество ниже, оно обычно перед "Отчет №"
-            let quantity = 0;
-            for (let j = i + 1; j < Math.min(i + 15, lines.length); j++) {
-                const nextLine = lines[j];
-                // Паттерн: "10 000Отчет No..." или "1 000Отчет No..." (без пробела между числом и словом)
-                const qtyMatch = nextLine.match(/^([\d\s]+)[Оо]тчет\s*[N№No]/);
-                if (qtyMatch) {
-                    quantity = parseFloat(qtyMatch[1].replace(/\s/g, ''));
-                    break;
-                }
-            }
-
-            if (dateStr && (currentName || currentRegNum || currentIsin)) {
-                results.push({
-                    period: dateStr,
-                    operationType: opType,
-                    name: currentName,
-                    regNum: currentRegNum,
-                    isin: currentIsin,
-                    amount: 0,
-                    quantity: quantity,
-                    currency: 'RUB',
-                    registrationDate: dateStr,
-                    fee: 0,
-                    debit_account: accountFromFilename,
-                    credit_account: ''
-                });
-            }
-        }
-    }
-
-    console.log(`[DEPO] Распознано записей: ${results.length}`);
-    return results;
-}
-
 app.post('/upload', upload.array('files'), async (req, res) => {
     const type = String(req.body.type || 'uk').toLowerCase();
     const mode = req.body.mode || 'overwrite';
+
+    // ОСВ: только превью плоской таблицы, без записи в trades (MVP)
+    if (type === 'osv') {
+        if (!req.files?.length) {
+            return res.status(400).json({ error: 'Нужен файл Excel' });
+        }
+        let ruleJson = null;
+        if (req.body.ruleJson && String(req.body.ruleJson).trim() !== '') {
+            let parsed;
+            try {
+                parsed = JSON.parse(req.body.ruleJson);
+            } catch (e) {
+                return res.status(400).json({ error: 'ruleJson: некорректный JSON' });
+            }
+            const validated = validateParsingRuleV2(parsed);
+            if (!validated.ok) {
+                return res.status(400).json({ error: validated.errors.join('; ') });
+            }
+            if (Number(validated.rule.rule_schema_version) !== 2) {
+                return res.status(400).json({ error: V2_ONLY_MSG });
+            }
+            ruleJson = validated.rule;
+        } else {
+            return res.status(400).json({ error: 'Для ОСВ нужен ruleJson (ParsingRule v2)' });
+        }
+        try {
+            const file = req.files[0];
+            const { rows, headers, rowCount } = (() => {
+                const r = runParseEngine(file.path, ruleJson);
+                if (!r.ok) throw new Error(r.errors.join('; '));
+                return {
+                    headers: r.headers,
+                    rows: r.rows.slice(0, 100),
+                    rowCount: r.rowCount,
+                };
+            })();
+            return res.json({
+                previewOnly: true,
+                type: 'osv',
+                rule: ruleJson,
+                headers,
+                rows,
+                rowCount,
+            });
+        } catch (err) {
+            return res.status(500).json({ error: err.message });
+        }
+    }
 
     let sourceName = 'UK';
     if (type === 'broker') sourceName = 'Broker';
@@ -434,10 +151,21 @@ app.post('/upload', upload.array('files'), async (req, res) => {
 
         let ruleJson = null;
         if (req.body.ruleJson && String(req.body.ruleJson).trim() !== '') {
-            const validated = parseAndValidateUkRuleJsonString(req.body.ruleJson);
+            let parsed;
+            try {
+                parsed = JSON.parse(req.body.ruleJson);
+            } catch (e) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ error: 'ruleJson: некорректный JSON' });
+            }
+            const validated = validateParsingRuleV2(parsed);
             if (!validated.ok) {
                 await client.query('ROLLBACK');
                 return res.status(400).json({ error: validated.errors.join('; ') });
+            }
+            if (Number(validated.rule.rule_schema_version) !== 2) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ error: V2_ONLY_MSG });
             }
             ruleJson = validated.rule;
         }
@@ -447,7 +175,22 @@ app.post('/upload', upload.array('files'), async (req, res) => {
             console.log('[UPLOAD] file.originalname =', file.originalname);
             let results = [];
             if (ruleJson && type === 'uk') {
-                results = smartParseUK(file.path, ruleJson);
+                const out = runParseEngine(file.path, ruleJson);
+                if (!out.ok) throw new Error(out.errors.join('; '));
+                results = out.rows.map((r) => ({
+                    period: r.period,
+                    operationType: r.operationType || ruleJson.output?.operation_type || '',
+                    name: r.name,
+                    regNum: r.regNum || '',
+                    isin: r.isin || '',
+                    amount: r.amount ?? 0,
+                    quantity: r.quantity ?? 0,
+                    currency: 'RUB',
+                    registrationDate: r.period,
+                    fee: 0,
+                    debit_account: r.debit_account || '',
+                    credit_account: r.credit_account || '',
+                }));
             } else if (type === 'uk') {
                 results = parseUK(file.path);
             } else if (type === 'broker') {

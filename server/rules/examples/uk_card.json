@@ -1,0 +1,46 @@
+{
+  "rule_schema_version": 2,
+  "meta": {
+    "name": "Карточка счёта УК — полная (58.01)",
+    "source_type": "excel",
+    "profile_hint": "uk_card",
+    "uk_mode": "full"
+  },
+  "layout": {
+    "layout_type": "fixed_columns",
+    "skip_rows": 7
+  },
+  "column_map": {
+    "period": 0,
+    "document": 1,
+    "analytics": 3,
+    "indicator": 5,
+    "debit_account": 6,
+    "amount": 7,
+    "credit_account": 9
+  },
+  "conditions": {
+    "debit_account_prefix": "58.01",
+    "mode": "full"
+  },
+  "multi_row": {
+    "indicator_column": 5,
+    "indicator_value": "Кол.",
+    "amount_column": 7,
+    "quantity_column": 7
+  },
+  "columns": [
+    { "target": "period", "source": { "type": "fixed_cell", "column": 0 } },
+    { "target": "document", "source": { "type": "fixed_cell", "column": 1 } },
+    { "target": "operation_type", "source": { "type": "fixed_cell", "column": 1, "transform": "uk_operation_type" } },
+    { "target": "name", "source": { "type": "fixed_cell", "column": 3, "transform": "analytics_name" } },
+    { "target": "regNum", "source": { "type": "fixed_cell", "column": 3, "transform": "analytics_reg" } },
+    { "target": "amount", "source": { "type": "fixed_cell", "column": 7 } },
+    { "target": "quantity", "source": { "type": "fixed_cell", "column": 7, "transform": "quantity_row" } },
+    { "target": "debit_account", "source": { "type": "fixed_cell", "column": 6 } },
+    { "target": "credit_account", "source": { "type": "fixed_cell", "column": 9 } }
+  ],
+  "output": {
+    "shape": "long"
+  }
+}

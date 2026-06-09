@@ -1,0 +1,40 @@
+{
+  "rule_schema_version": 2,
+  "meta": {
+    "name": "Ведомость ОС — годы в колонках (wide)",
+    "source_type": "excel",
+    "sheet_name": "Исходная выгрузка 01",
+    "profile_hint": "os_wide_years"
+  },
+  "layout": {
+    "layout_type": "wide_metrics",
+    "name_column": 0
+  },
+  "hierarchy": {
+    "leaf_rules": {
+      "min_name_length": 5
+    }
+  },
+  "columns": [
+    { "target": "Юрлицо", "source": { "type": "entity_from_header" } },
+    { "target": "Группа", "source": { "type": "hierarchy_field", "field": "group" } },
+    { "target": "Подразделение", "source": { "type": "hierarchy_field", "field": "subdivision" } },
+    { "target": "ОС", "source": { "type": "hierarchy_field", "field": "asset_name" } },
+    {
+      "target": "начало",
+      "source": { "type": "metric", "measure": "residual_open", "period_suffix": "{year} - начало" }
+    },
+    {
+      "target": "амортизация",
+      "source": { "type": "metric", "measure": "amort_charge", "period_suffix": "{year} - амортизация" }
+    },
+    {
+      "target": "конец",
+      "source": { "type": "metric", "measure": "residual_close", "period_suffix": "{year} - конец" }
+    }
+  ],
+  "filters": {
+    "skip_row_patterns": ["^Итого"]
+  },
+  "output": { "shape": "wide" }
+}

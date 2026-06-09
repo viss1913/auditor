@@ -1,0 +1,39 @@
+{
+  "rule_schema_version": 2,
+  "meta": {
+    "name": "ОСВ по счёту 08",
+    "source_type": "excel",
+    "sheet_name": "Исходная выгрузка 08",
+    "profile_hint": "os_osv_08"
+  },
+  "layout": {
+    "layout_type": "hierarchy_osv",
+    "name_column": 0
+  },
+  "hierarchy": {
+    "leaf_rules": {
+      "min_name_length": 15,
+      "skip_name_patterns": ["^ОП\\s", "^08", "^Итого", "^Объекты"]
+    }
+  },
+  "columns": [
+    { "target": "Юрлицо", "source": { "type": "entity_from_header" } },
+    { "target": "Счёт", "source": { "type": "hierarchy_field", "field": "account" } },
+    { "target": "Подразделение", "source": { "type": "hierarchy_field", "field": "subdivision" } },
+    { "target": "Контрагент", "source": { "type": "hierarchy_field", "field": "counterparty" } },
+    { "target": "Договор", "source": { "type": "hierarchy_field", "field": "contract" } },
+    { "target": "Объект", "source": { "type": "hierarchy_field", "field": "object_name" } },
+    { "target": "Период", "source": { "type": "hierarchy_field", "field": "period_label" } },
+    { "target": "Год", "source": { "type": "hierarchy_field", "field": "period_year" } },
+    { "target": "Сальдо Дт начало", "source": { "type": "osv_turnover", "field": "saldo_dt_open" } },
+    { "target": "Сальдо Кт начало", "source": { "type": "osv_turnover", "field": "saldo_kt_open" } },
+    { "target": "Оборот Дт", "source": { "type": "osv_turnover", "field": "turnover_dt" } },
+    { "target": "Оборот Кт", "source": { "type": "osv_turnover", "field": "turnover_kt" } },
+    { "target": "Сальдо Дт конец", "source": { "type": "osv_turnover", "field": "saldo_dt_close" } },
+    { "target": "Сальдо Кт конец", "source": { "type": "osv_turnover", "field": "saldo_kt_close" } }
+  ],
+  "filters": {
+    "skip_row_patterns": ["^Итого"]
+  },
+  "output": { "shape": "wide" }
+}

@@ -41,6 +41,27 @@ const migrate = async () => {
         `);
         console.log('Таблица parsing_rules проверена/создана.');
 
+        await pool.query(`ALTER TABLE parsing_rules ADD COLUMN IF NOT EXISTS name TEXT;`);
+        await pool.query(`ALTER TABLE parsing_rules ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1;`);
+        await pool.query(`ALTER TABLE parsing_rules ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES parsing_rules(id);`);
+        await pool.query(`ALTER TABLE parsing_rules ADD COLUMN IF NOT EXISTS fixture_file_name TEXT;`);
+        await pool.query(`ALTER TABLE parsing_rules ADD COLUMN IF NOT EXISTS expected_row_count INTEGER;`);
+        await pool.query(`ALTER TABLE parsing_rules ADD COLUMN IF NOT EXISTS rule_schema_version INTEGER DEFAULT 1;`);
+        console.log('Колонки библиотеки правил (v2) проверены.');
+
+        const { PARSE_SNAPSHOT_DDL } = require('./parse_snapshot_schema');
+        await pool.query(PARSE_SNAPSHOT_DDL);
+        console.log('Таблицы parse_snapshots / parsed_rows / table_operations проверены.');
+
+        await pool.query(`
+            ALTER TABLE chat_history
+            ADD COLUMN IF NOT EXISTS chat_session_id INTEGER REFERENCES chat_sessions(id) ON DELETE CASCADE;
+        `);
+        await pool.query(`
+            CREATE INDEX IF NOT EXISTS idx_chat_history_session ON chat_history(chat_session_id);
+        `);
+        console.log('Колонка chat_session_id в chat_history проверена.');
+
         console.log('Миграция успешно завершена!');
     } catch (err) {
         console.error('Ошибка миграции:', err);

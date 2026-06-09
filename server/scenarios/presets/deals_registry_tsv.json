@@ -1,0 +1,6 @@
+{
+  "id": "deals_registry_tsv",
+  "name": "Реестр сделок (txt)",
+  "description": "Текстовый реестр сделок 1С",
+  "chatHints": ["реестр сделок", "txt", "сделки"]
+}

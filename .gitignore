@@ -29,3 +29,13 @@ dist-ssr
 # Word lock files
 **/~$*.docx
 
+# Local / generated
+.cursor/
+output/
+word/
+server/_auto_start_out*.json
+
+# Client sample data (keep locally, do not push)
+docs/ksenia/
+docs/Anton/
+
