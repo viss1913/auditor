@@ -25,6 +25,8 @@ const {
     buildColumnsFromExtract,
 } = require('./universal_parse/pdf_parse_scenario_coords');
 const { diagnoseGridExtract } = require('./universal_parse/pdf_grid_diagnostics');
+const { confirmPdfDraft } = require('./universal_parse/universal_parse_orchestrator');
+const { extractLayoutFromScenario } = require('./universal_parse/pdf_parse_scenario_coords');
 
 const memUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
@@ -121,6 +123,41 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
 
             const autoNorm = centersToNorm(grid.meta?.columnCenters || [], metrics.pageWidthPt);
 
+            let similarScenarioCentersNorm = null;
+            let similarScenarioName = null;
+            if (pool) {
+                try {
+                    const pdfProbe = await probePdfKind(file.buffer, file.originalname || '');
+                    const resolution = await resolvePdfParseScenario(pool, file.buffer, pdfProbe, {
+                        projectId: req.body?.project_id,
+                        sectionId: req.body?.section_id,
+                    });
+                    const parseSc = resolution?.parseScenario;
+                    const scenarioId =
+                        parseSc?.status === 'found'
+                            ? parseSc.scenarioId
+                            : parseSc?.candidates?.[0]?.id || null;
+                    if (scenarioId && (parseSc?.status === 'found' || parseSc?.status === 'similar')) {
+                        const row = await getPdfParseScenarioById(pool, scenarioId);
+                        if (row?.ruleJson || row?.rule_json) {
+                            const layout = extractLayoutFromScenario(
+                                row.ruleJson || row.rule_json,
+                                metrics.pageWidthPt
+                            );
+                            if (layout.columnCenters?.length >= 2) {
+                                similarScenarioCentersNorm = centersToNorm(
+                                    layout.columnCenters,
+                                    metrics.pageWidthPt
+                                );
+                                similarScenarioName = row.name || parseSc.scenarioName;
+                            }
+                        }
+                    }
+                } catch {
+                    /* non-fatal */
+                }
+            }
+
             res.json({
                 page,
                 pageWidthPt: metrics.pageWidthPt,
@@ -135,6 +172,8 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
                 rowCount: rows.length,
                 autoColumnCenters: grid.meta?.columnCenters || [],
                 autoColumnCentersNorm: autoNorm,
+                similarScenarioCentersNorm,
+                similarScenarioName,
                 headers: grid.headers || [],
                 previewRows: (grid.rows || []).slice(0, 30),
                 confidence: grid.confidence || 0,
@@ -276,6 +315,37 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
             });
             if (!saved.ok) return res.status(400).json({ error: saved.errors.join('; ') });
             res.json({ scenario: saved.scenario });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    router.post('/pdf-parse-confirm', memUpload.single('file'), async (req, res) => {
+        try {
+            const file = req.file;
+            if (!file?.buffer?.length) {
+                return res.status(400).json({ error: 'Нужен PDF в поле file' });
+            }
+            let headers = [];
+            let rows = [];
+            try {
+                headers = JSON.parse(req.body?.headers || '[]');
+                rows = JSON.parse(req.body?.rows || '[]');
+            } catch {
+                return res.status(400).json({ error: 'headers и rows должны быть JSON' });
+            }
+            const result = await confirmPdfDraft(pool, {
+                file,
+                projectId: req.body?.project_id || req.body?.projectId || null,
+                scenarioId: req.body?.scenario_id || req.body?.scenarioId || 'pdf_extracted',
+                headers,
+                rows,
+                sheetName: req.body?.sheet_name || req.body?.sheetName || null,
+            });
+            if (!result.ok) {
+                return res.status(400).json({ error: (result.errors || ['Ошибка confirm']).join('; ') });
+            }
+            res.json(result);
         } catch (err) {
             res.status(500).json({ error: err.message });
         }

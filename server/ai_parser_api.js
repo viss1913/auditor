@@ -74,7 +74,7 @@ const { planTreeRuleWithLlm, isTreeIntentMessage } = require('./tree_rule_llm');
 const { detectSourceKind } = require('./file_dispatch');
 const { parse1cTsvExport } = require('./parse_1c_tsv');
 const { resolveUpload, shouldRequireTreeConfirm } = require('./scenario_router');
-const { parseUniversal } = require('./universal_parse/universal_parse_orchestrator');
+const { parseUniversal, confirmPdfDraft } = require('./universal_parse/universal_parse_orchestrator');
 const { parseRequestedTableColumns } = require('./document_scan_llm');
 const { scenarioDisplayName } = require('./scenarios/catalog');
 const { checkUkParseSanity } = require('./uk_sanity');
@@ -381,12 +381,13 @@ function computeRuleDiff(before, after) {
     return { changes: changes.length ? changes : ['мелкие правки в правиле'] };
 }
 
-async function buildUniversalAutostartResponse(file, routed, { projectId, userMessage } = {}) {
+async function buildUniversalAutostartResponse(file, routed, { projectId, userMessage, orchestratorAnswers } = {}) {
     const result = await parseUniversal({
         pool,
         file,
         projectId,
         userMessage: userMessage || '',
+        orchestratorAnswers: orchestratorAnswers || {},
     });
     if (!result.ok && result.errors) {
         return { ok: false, errors: result.errors };
@@ -478,10 +479,14 @@ async function buildUniversalAutostartResponse(file, routed, { projectId, userMe
     };
 }
 
-async function respondUniversalPdfAutostart(res, { sourceFile, routed, projectId, userMessage, chatSessionId }) {
+async function respondUniversalPdfAutostart(
+    res,
+    { sourceFile, routed, projectId, userMessage, chatSessionId, orchestratorAnswers }
+) {
     const session = await buildUniversalAutostartResponse(sourceFile, routed, {
         projectId,
         userMessage: userMessage || '',
+        orchestratorAnswers: orchestratorAnswers || {},
     });
     if (!session.ok) {
         if (session.delegateDepo) {
@@ -530,12 +535,13 @@ async function respondUniversalPdfAutostart(res, { sourceFile, routed, projectId
         assistantMessage: session.assistantMessage,
         warnings: session.warnings,
         layoutAnalysis: session.layoutMeta,
-        needsScenarioChoice: false,
+        needsScenarioChoice: Boolean(session.needsScenarioChoice),
         needsConfirm: session.needsConfirm,
         scenarioId: session.scenarioId,
         scenarioName: session.scenarioName,
         confidence: session.confidence,
         sourceKind: session.sourceKind,
+        candidates: session.candidates || [],
         meta: session.meta,
         pendingQuestions: session.pendingQuestions,
         currentQuestion: session.currentQuestion,
@@ -546,6 +552,9 @@ async function respondUniversalPdfAutostart(res, { sourceFile, routed, projectId
         multiTable: session.multiTable || false,
         snapshots: session.snapshots || null,
         sheetNames: session.sheetNames || null,
+        validationReport: session.validationReport || null,
+        gridDiagnostics: session.gridDiagnostics || null,
+        scenarioResolution: session.scenarioResolution || null,
     });
 }
 
@@ -787,6 +796,7 @@ async function parseMultiplePdfDocumentsFromBatch({
     chatSessionId,
     parsePlan,
     res,
+    orchestratorAnswers,
 }) {
     const pdfFiles = (files || []).filter((f) => isPdfLikeFile(f) && f.buffer);
     if (!pdfFiles.length) {
@@ -812,6 +822,7 @@ async function parseMultiplePdfDocumentsFromBatch({
                 file,
                 projectId,
                 userMessage,
+                orchestratorAnswers: orchestratorAnswers || {},
             });
             if (result.scenarioId) primaryScenarioId = result.scenarioId;
 
@@ -2739,6 +2750,7 @@ async function runBatchStartFromUploads({ files, targetFile, body, res }) {
                         chatSessionId,
                         parsePlan,
                         res,
+                        orchestratorAnswers,
                     });
                 }
 
@@ -2789,6 +2801,7 @@ async function runBatchStartFromUploads({ files, targetFile, body, res }) {
                         chatSessionId,
                         parsePlan,
                         res,
+                        orchestratorAnswers,
                     });
                 }
                 if (body.pathScope?.path && excelOnly.length >= 1) {
@@ -3006,6 +3019,7 @@ async function runBatchStartFromUploads({ files, targetFile, body, res }) {
                     projectId,
                     userMessage,
                     chatSessionId,
+                    orchestratorAnswers: rawOrchestratorAnswers,
                 });
             }
 
@@ -3218,6 +3232,7 @@ router.post('/parse/auto-start', upload.fields([{ name: 'file' }, { name: 'targe
                 projectId,
                 userMessage: req.body.userMessage || '',
                 chatSessionId: parsedChatSessionId,
+                orchestratorAnswers,
             });
         }
 

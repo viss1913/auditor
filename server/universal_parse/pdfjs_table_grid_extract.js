@@ -152,7 +152,7 @@ function clusterPositions(positions, xTol = 40) {
     return centers;
 }
 
-function columnCentersFromDataRows(regionRows, dataStart, sampleCount = 8, xTol = 40) {
+function columnCentersFromDataRows(regionRows, dataStart, sampleCount = 8, xTol = 40, cellGap = 8) {
     const end = Math.min(regionRows.length, dataStart + sampleCount);
     let bestGroups = null;
     let bestCount = 0;
@@ -160,7 +160,7 @@ function columnCentersFromDataRows(regionRows, dataStart, sampleCount = 8, xTol 
 
     for (let i = dataStart; i < end; i++) {
         if (!isDataRowText(regionRows[i].text)) continue;
-        const groups = rowToCellGroups(regionRows[i], 8);
+        const groups = rowToCellGroups(regionRows[i], cellGap);
         if (groups.length > bestCount) {
             bestCount = groups.length;
             bestGroups = groups;
@@ -172,23 +172,90 @@ function columnCentersFromDataRows(regionRows, dataStart, sampleCount = 8, xTol 
         return bestGroups.map((g) => g.left);
     }
     if (lefts.length >= 2) return clusterPositions(lefts, xTol);
-    return rowToCellGroups(regionRows[dataStart], 8).map((g) => g.left);
+    return rowToCellGroups(regionRows[dataStart], cellGap).map((g) => g.left);
 }
 
-function columnCentersFromHeaderRows(regionRows, dataStart) {
+function columnCentersFromHeaderRows(regionRows, dataStart, cellGap = 8) {
     let bestGroups = null;
     for (let i = 0; i < dataStart; i++) {
-        const groups = rowToCellGroups(regionRows[i], 8);
+        const groups = rowToCellGroups(regionRows[i], cellGap);
         if (!bestGroups || groups.length > bestGroups.length) bestGroups = groups;
     }
     return bestGroups?.length >= 2 ? bestGroups.map((g) => g.left) : [];
 }
 
-function resolveColumnCenters(regionRows, dataStart, xTol = 40) {
-    const fromData = columnCentersFromDataRows(regionRows, dataStart, 12, xTol);
+function resolveColumnCenters(regionRows, dataStart, xTol = 40, cellGap = 8) {
+    const fromData = columnCentersFromDataRows(regionRows, dataStart, 12, xTol, cellGap);
     if (fromData.length >= 2) return fromData;
-    const fromHeaders = columnCentersFromHeaderRows(regionRows, dataStart);
+    const fromHeaders = columnCentersFromHeaderRows(regionRows, dataStart, cellGap);
     return fromHeaders.length >= 2 ? fromHeaders : fromData;
+}
+
+function buildGridProfileCandidates(sectionId) {
+    const base = getSectionGridProfile(sectionId);
+    const gaps = [...new Set([base.cellGap, Math.max(4, base.cellGap - 2), base.cellGap + 2])];
+    const targets = base.targetCols
+        ? [
+              ...new Set(
+                  [base.targetCols, base.targetCols - 1, base.targetCols + 1].filter(
+                      (t) => t >= base.minCols && t <= base.maxCols
+                  )
+              ),
+          ]
+        : [null];
+    const out = [];
+    for (const cellGap of gaps) {
+        for (const targetCols of targets) {
+            out.push({ cellGap, targetCols: targetCols ?? base.targetCols });
+        }
+    }
+    return out.slice(0, 6);
+}
+
+function scoreGridExtractCandidate(result, expectedCols) {
+    if (!result?.ok || !result.rows?.length) return -1;
+    try {
+        const { diagnoseGridExtract } = require('./pdf_grid_diagnostics');
+        const d = diagnoseGridExtract(result, expectedCols || result.headers?.length);
+        let score = (d.confidence || 0) * 100 + Math.min(result.rows.length, 25);
+        const emptyRatio = (d.suspiciousCols?.length || 0) / Math.max(result.headers?.length || 1, 1);
+        score -= emptyRatio * 60;
+        return score;
+    } catch {
+        return result.rows.length;
+    }
+}
+
+function extractTableFromRowsBest(rows, startIdx, endIdx, options = {}) {
+    if (options.columnCenters?.length >= 2 || options.skipMultiCandidate) {
+        return extractTableFromRows(rows, startIdx, endIdx, options);
+    }
+    const candidates = buildGridProfileCandidates(options.sectionId);
+    if (candidates.length <= 1) {
+        return extractTableFromRows(rows, startIdx, endIdx, options);
+    }
+    let best = null;
+    let bestScore = -Infinity;
+    for (const variant of candidates) {
+        const profile = { ...getSectionGridProfile(options.sectionId), ...variant };
+        const result = extractTableFromRows(rows, startIdx, endIdx, {
+            ...options,
+            gridProfile: profile,
+        });
+        const score = scoreGridExtractCandidate(result, profile.targetCols);
+        if (score > bestScore) {
+            bestScore = score;
+            best = {
+                ...result,
+                meta: {
+                    ...(result.meta || {}),
+                    gridCandidate: variant,
+                    gridCandidateScore: score,
+                },
+            };
+        }
+    }
+    return best || extractTableFromRows(rows, startIdx, endIdx, options);
 }
 
 function sampleDataRows(regionRows, dataStart, sampleCount = 25) {
@@ -246,7 +313,7 @@ function inferAdaptiveColumnCenters(regionRows, dataStart, profile = {}) {
 
     const sampleRows = sampleDataRows(regionRows, dataStart, 25);
     if (!sampleRows.length) {
-        const fallback = resolveColumnCenters(regionRows, dataStart, 40);
+        const fallback = resolveColumnCenters(regionRows, dataStart, 40, profile.cellGap ?? 12);
         return { centers: fallback, xTol: 40 };
     }
 
@@ -660,7 +727,8 @@ function extractTableFromRows(rows, startIdx, endIdx, options = {}) {
         return { ok: false, headers: [], rows: [], confidence: 0, method: 'pdfjs_grid' };
     }
 
-    const profile = getSectionGridProfile(options.sectionId);
+    const profile = options.gridProfile || getSectionGridProfile(options.sectionId);
+    const cellGap = profile.cellGap ?? 12;
     const regionRows = slice.slice(1);
     const cachedCenters = options.columnCenters;
     const dataStart =
@@ -822,7 +890,7 @@ async function extractTableGridFromPdf(buffer, options = {}) {
         }
     }
 
-    return extractTableFromRows(rows, startIdx, endIdx, options);
+    return extractTableFromRowsBest(rows, startIdx, endIdx, options);
 }
 
 /**
@@ -994,6 +1062,8 @@ module.exports = {
     rowToCellGroups,
     assignRowToColumns,
     extractTableFromRows,
+    extractTableFromRowsBest,
+    buildGridProfileCandidates,
     extractTableGridFromPdf,
     extractSectionsFromGrid,
     findSectionRowIndex,

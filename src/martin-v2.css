@@ -2314,6 +2314,30 @@ body.mv2-resizing * {
   opacity: 0.9;
 }
 
+.mv2-pdf-kind-cards {
+  margin: 0.75rem 0 0;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: var(--mv2-surface-2, #f4f6f8);
+  border: 1px solid var(--mv2-border, #dde3ea);
+}
+
+.mv2-pdf-kind-cards__title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.mv2-export-btn--confirm {
+  background: #1a7f37;
+  color: #fff;
+  border-color: #1a7f37;
+}
+
+.mv2-export-btn--confirm:hover {
+  background: #146c2e;
+}
+
 .mv2-merge-actions {
   display: flex;
   flex-direction: column;

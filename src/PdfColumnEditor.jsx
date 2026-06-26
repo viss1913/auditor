@@ -31,10 +31,13 @@ export default function PdfColumnEditor({ file, meta, onClose, onSaved }) {
             if (!res.ok) throw new Error(data.error || 'Ошибка preview');
 
             setPreview(data);
-            const norms = data.autoColumnCentersNorm?.length
-                ? [...data.autoColumnCentersNorm]
-                : [0.1, 0.5, 0.9];
-            setCentersNorm(norms);
+            const startNorms =
+                data.similarScenarioCentersNorm?.length >= 2
+                    ? [...data.similarScenarioCentersNorm]
+                    : data.autoColumnCentersNorm?.length
+                      ? [...data.autoColumnCentersNorm]
+                      : [0.1, 0.5, 0.9];
+            setCentersNorm(startNorms);
             setHeaders(data.headers?.length ? [...data.headers] : norms.map((_, i) => `col_${i + 1}`));
             setScenarioName(
                 meta?.scenarioName ||
@@ -192,6 +195,11 @@ export default function PdfColumnEditor({ file, meta, onClose, onSaved }) {
         <div className="pdf-column-editor">
             <div className="pdf-column-editor__header">
                 <strong>Редактор колонок PDF</strong>
+                {preview?.similarScenarioName ? (
+                    <span className="pdf-column-editor__hint-inline">
+                        Похожий сценарий: {preview.similarScenarioName}
+                    </span>
+                ) : null}
                 <span className="pdf-column-editor__hint-inline">
                     Перетащи линии · двойной клик — новая колонка
                 </span>

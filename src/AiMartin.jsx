@@ -371,6 +371,7 @@ export default function AiMartin() {
   const [routeConfidence, setRouteConfidence] = useState(null);
   const [sourceKind, setSourceKind] = useState('');
   const [needsScenarioChoice, setNeedsScenarioChoice] = useState(false);
+  const [needsConfirm, setNeedsConfirm] = useState(false);
   const [scenarioCandidates, setScenarioCandidates] = useState([]);
   const [treeSample, setTreeSample] = useState([]);
   const [pendingQuestions, setPendingQuestions] = useState([]);
@@ -983,6 +984,7 @@ export default function AiMartin() {
 
     if (data.layoutAnalysis) setLayoutAnalysis(data.layoutAnalysis);
     setNeedsScenarioChoice(Boolean(data.needsScenarioChoice));
+    setNeedsConfirm(Boolean(data.needsConfirm));
     setScenarioCandidates(data.candidates || []);
     setTreeSample(
       data.treeSample ||
@@ -1636,6 +1638,85 @@ export default function AiMartin() {
     startParseFromStaged(SCENARIO_PHRASES[scenarioId] || '', scenarioId);
   };
 
+  const pickPdfKind = (kindId) => {
+    if (!inboxReady) return;
+    setNeedsScenarioChoice(false);
+    setCurrentQuestion(null);
+    setPendingQuestions([]);
+    const next = { ...(orchestratorAnswers || {}), pick_pdf_kind: kindId };
+    setOrchestratorAnswers(next);
+    const scenarioMap = {
+      broker_report: 'broker_pdf',
+      depo: 'opif_depo',
+      upd_ediweb: 'upd_ediweb',
+      unknown_pdf: 'unknown_pdf',
+    };
+    runInboxParse({
+      userMessage: 'разбери pdf',
+      scenarioId: scenarioMap[kindId] || kindId,
+      nextAnswers: next,
+      targetSheetName: activeSheet || undefined,
+    });
+  };
+
+  const confirmPdfParse = async () => {
+    if (!aiFile || !parsePreview?.headers?.length) return;
+    setAiLoading(true);
+    setLoadingHint('Сохраняю в snapshot…');
+    try {
+      const fd = new FormData();
+      fd.append('file', aiFile);
+      fd.append('headers', JSON.stringify(parsePreview.headers));
+      fd.append('rows', JSON.stringify(parsePreview.rows || []));
+      fd.append('scenario_id', selectedScenario || 'pdf_extracted');
+      if (projectId) fd.append('project_id', String(projectId));
+      const res = await fetch(`${API}/pdf-parse-confirm`, { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Не удалось подтвердить парс');
+      setSnapshotId(data.snapshotId);
+      setActiveTableId(data.snapshotId);
+      setNeedsConfirm(false);
+      setCurrentQuestion(null);
+      setPendingQuestions([]);
+      setChatTables((prev) =>
+        prev.map((t) =>
+          t.isDraft || String(t.snapshotId).startsWith('draft-')
+            ? {
+                ...t,
+                snapshotId: data.snapshotId,
+                isDraft: false,
+                rowCount: data.parsePreview?.rowCount ?? t.rowCount,
+              }
+            : t
+        )
+      );
+      if (data.parsePreview) setParsePreview(data.parsePreview);
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `Подтвердила парс: **${data.parsePreview?.rowCount ?? data.rowCount ?? 0}** строк в snapshot.`,
+          artifact: {
+            snapshotId: data.snapshotId,
+            label: aiFile?.name || 'PDF',
+            rowCount: data.parsePreview?.rowCount ?? data.rowCount ?? 0,
+          },
+        },
+      ]);
+      if (chatSessionId && data.snapshotId) {
+        await refreshChatSessions();
+      }
+    } catch (e) {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: `Не вышло подтвердить парс: ${e.message}` },
+      ]);
+    } finally {
+      setAiLoading(false);
+      setLoadingHint('');
+    }
+  };
+
   const startParseFromStaged = async (userMessage, scenarioIdOverride) => {
     if (!inboxReady) return;
     await runInboxParse({
@@ -1657,6 +1738,7 @@ export default function AiMartin() {
     setCurrentRule(null);
     setLayoutAnalysis(null);
     setNeedsScenarioChoice(false);
+    setNeedsConfirm(false);
     setSheetNames([]);
     setActiveSheet('');
     setSheetSessions({});
@@ -1878,8 +1960,30 @@ export default function AiMartin() {
       next.mergeStrategy = value;
       next.pick_merge_strategy = value;
     }
+    if (questionId === 'pdf_kind_choice') {
+      next.pick_pdf_kind = value;
+    }
 
     setOrchestratorAnswers(next);
+
+    if (questionId === 'pdf_kind_choice') {
+      const scenarioMap = {
+        broker_report: 'broker_pdf',
+        depo: 'opif_depo',
+        upd_ediweb: 'upd_ediweb',
+        unknown_pdf: 'unknown_pdf',
+      };
+      setNeedsScenarioChoice(false);
+      setCurrentQuestion(null);
+      setPendingQuestions([]);
+      runInboxParse({
+        userMessage: 'разбери pdf',
+        scenarioId: scenarioMap[value] || value,
+        nextAnswers: next,
+        targetSheetName: activeSheet || undefined,
+      });
+      return;
+    }
 
     if (questionId === 'pick_merge_strategy') {
       const lastUser =
@@ -2118,6 +2222,21 @@ export default function AiMartin() {
           nextAnswers: orchestratorAnswers,
           targetSheetName: activeSheet || undefined,
         });
+        return;
+      }
+    }
+
+    if (text && !currentQuestion && needsScenarioChoice && sourceKind === 'pdf' && scenarioCandidates.length) {
+      const lower = text.toLowerCase();
+      const picked = scenarioCandidates.find(
+        (c) =>
+          lower.includes(String(c.label || '').toLowerCase()) ||
+          lower.includes(String(c.scenarioId || '').replace(/_/g, ' '))
+      );
+      if (picked) {
+        setChatMessages((prev) => [...prev, { role: 'user', content: text }]);
+        setInputText('');
+        pickPdfKind(picked.scenarioId);
         return;
       }
     }
@@ -3140,6 +3259,7 @@ export default function AiMartin() {
     if (!session) return;
     if (session.layoutAnalysis) setLayoutAnalysis(session.layoutAnalysis);
     setNeedsScenarioChoice(Boolean(session.needsScenarioChoice));
+    setNeedsConfirm(Boolean(session.needsConfirm));
     setScenarioCandidates(session.scenarioCandidates || []);
     setTreeSample(session.treeSample || []);
     setPendingQuestions(session.pendingQuestions || []);
@@ -3274,6 +3394,20 @@ export default function AiMartin() {
       if (b.id === 'os_01_hierarchy') return 1;
       return 0;
     });
+
+  const pdfKindOptions = useMemo(() => {
+    if (!needsScenarioChoice || sourceKind !== 'pdf') return [];
+    return (scenarioCandidates || []).map((c) => ({
+      id: c.scenarioId,
+      label: c.label || c.scenarioId,
+      score: c.score,
+      confidence: c.confidence,
+    }));
+  }, [needsScenarioChoice, sourceKind, scenarioCandidates]);
+
+  const pdfKindChoicePending = needsScenarioChoice && sourceKind === 'pdf' && pdfKindOptions.length > 0;
+  const pdfDraftPending =
+    sourceKind === 'pdf' && !snapshotId && parsePreview?.headers?.length && needsConfirm;
   const formatChatDate = (iso) => {
     if (!iso) return '';
     try {
@@ -3344,6 +3478,32 @@ export default function AiMartin() {
     }
     return (
       <div key={i}>{renderChatBubble(m.role, m.content, traceExtra)}</div>
+    );
+  };
+
+  const renderPdfKindChoiceCards = () => {
+    if (!pdfKindChoicePending) return null;
+    return (
+      <div className="mv2-pdf-kind-cards">
+        <div className="mv2-pdf-kind-cards__title">Какой это PDF?</div>
+        <div className="mv2-merge-actions">
+          {pdfKindOptions.map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              className="mv2-merge-action-btn"
+              onClick={() => pickPdfKind(opt.id)}
+              disabled={aiLoading}
+            >
+              {opt.label}
+              {opt.score != null ? ` · score ${opt.score}` : ''}
+              {opt.confidence != null && opt.score == null
+                ? ` · ${Math.round(opt.confidence * 100)}%`
+                : ''}
+            </button>
+          ))}
+        </div>
+      </div>
     );
   };
 
@@ -3427,6 +3587,13 @@ export default function AiMartin() {
         return renderChatBubble('assistant', `Жду ответ в поле ниже.${optionsHint}`);
       }
       return renderChatBubble('assistant', `${prompt}${optionsHint}`);
+    }
+
+    if (needsScenarioChoice && sourceKind === 'pdf' && pdfKindOptions.length) {
+      return renderChatBubble(
+        'assistant',
+        'Не могу однозначно определить тип PDF. Выбери кнопкой ниже или напиши в чате: брокер, депо, УПД.'
+      );
     }
 
     if (needsScenarioChoice && choiceScenarios.length) {
@@ -3519,10 +3686,11 @@ export default function AiMartin() {
           onClose={() => setPdfColumnEditorOpen(false)}
           onSaved={() => {
             setPdfColumnEditorOpen(false);
-            setChatMessages((prev) => [
-              ...prev,
-              { role: 'assistant', content: 'Сценарий PDF сохранён. Загрузи файл снова — подхватится автоматически.' },
-            ]);
+            runInboxParse({
+              userMessage: 'разбери pdf',
+              nextAnswers: orchestratorAnswers,
+              targetSheetName: activeSheet || undefined,
+            });
           }}
         />
       ) : null}
@@ -3590,6 +3758,27 @@ export default function AiMartin() {
               <span className="mv2-append-badge" title="Дозапись в открытую таблицу">
                 + в таблицу #{appendTargetSnapshotId}
               </span>
+            )}
+            {pdfDraftPending && (
+              <>
+                <button
+                  type="button"
+                  className="mv2-export-btn mv2-export-btn--confirm"
+                  onClick={confirmPdfParse}
+                  disabled={aiLoading}
+                  title="Импортировать черновик в snapshot"
+                >
+                  Подтвердить парс
+                </button>
+                <button
+                  type="button"
+                  className="mv2-export-btn"
+                  onClick={() => setPdfColumnEditorOpen(true)}
+                  disabled={aiLoading}
+                >
+                  Настроить колонки
+                </button>
+              </>
             )}
             {(snapshotId || activeTableId) &&
               !String(snapshotId || activeTableId).startsWith('draft-') && (
@@ -3775,7 +3964,13 @@ export default function AiMartin() {
           )}
 
           <div ref={tableScrollRef} className="mv2-table-area table-container">
-            {!parsePreview && (
+            {pdfKindChoicePending && (
+              <div className="mv2-empty">
+                <span className="mv2-empty__icon">📄</span>
+                <p>Сначала выбери тип PDF в чате справа — таблицу покажу после разбора.</p>
+              </div>
+            )}
+            {!parsePreview && !pdfKindChoicePending && (
               <div className="mv2-empty">
                 <span className="mv2-empty__icon">📊</span>
                 <p>
@@ -3785,7 +3980,7 @@ export default function AiMartin() {
                 </p>
               </div>
             )}
-            {parsePreview && (
+            {parsePreview && !pdfKindChoicePending && (
               <>
                 {rowsLoading && <p className="hint" style={{ padding: '0.5rem' }}>Загружаю страницу…</p>}
                 <ExcelGridTable
@@ -3857,6 +4052,7 @@ export default function AiMartin() {
             {chatMessages.map((m, i) => renderMessage(m, i))}
             {renderQuestionInChat()}
             {renderMergeStrategyCards()}
+            {renderPdfKindChoiceCards()}
             {aiLoading && <MartinLoader hint={loadingHint || 'Думаю…'} />}
           </div>
 

@@ -32,6 +32,30 @@ const {
     PDF_VALIDATION_STRICT,
 } = require('../confidence_thresholds');
 
+function applyForcedPdfKind(probe, orchestratorAnswers = {}) {
+    const forced =
+        orchestratorAnswers.pick_pdf_kind ||
+        orchestratorAnswers.pdfKind ||
+        null;
+    if (!forced || probe.sourceKind !== 'pdf' || !probe.pdfProbe) return probe;
+
+    const pdfProbe = {
+        ...probe.pdfProbe,
+        kind: forced,
+        ambiguous: false,
+        confidence: Math.max(probe.pdfProbe.confidence || 0.5, 0.82),
+        userForcedKind: true,
+    };
+    return {
+        ...probe,
+        pdfProbe,
+        layoutMeta: {
+            ...(probe.layoutMeta || {}),
+            pdfProbe,
+        },
+    };
+}
+
 async function importTableToSnapshot(pool, { file, projectId, scenarioId, headers, rows, sheetName = null }) {
     const store = createParseSnapshotStore(pool);
     const sid = await store.createSnapshot({
@@ -314,7 +338,10 @@ async function parsePdfUniversal(ctx) {
     const kind = probe.pdfProbe?.kind;
     const confidence = probe.pdfProbe?.confidence ?? 0.5;
 
-    if (probe.pdfProbe?.ambiguous || (kind === 'unknown' && (probe.pdfProbe?.alternatives?.length || 0) >= 2)) {
+    if (
+        !probe.pdfProbe?.userForcedKind &&
+        (probe.pdfProbe?.ambiguous || (kind === 'unknown' && (probe.pdfProbe?.alternatives?.length || 0) >= 2))
+    ) {
         return buildPdfAmbiguousResponse(probe, confidence);
     }
 
@@ -615,15 +642,16 @@ async function parsePdfUniversal(ctx) {
  * @param {{ pool, file, projectId?, userMessage?, sheetName?, orchestratorAnswers? }} input
  */
 async function parseUniversal(input) {
-    const { pool, file, projectId, userMessage, sheetName } = input;
+    const { pool, file, projectId, userMessage, sheetName, orchestratorAnswers } = input;
     if (!file?.buffer) {
         return { ok: false, errors: ['file.buffer required'] };
     }
 
-    const probe = await probeDocument(file.buffer, file.originalname || '', {
+    let probe = await probeDocument(file.buffer, file.originalname || '', {
         sheetName,
         userMessage,
     });
+    probe = applyForcedPdfKind(probe, orchestratorAnswers || {});
 
     if (probe.sourceKind === 'excel') {
         const excelResult = await parseExcelUniversal({ pool, file, sheetName, projectId, probe });
@@ -679,12 +707,43 @@ async function parseUniversal(input) {
     };
 }
 
+/**
+ * Импорт черновика PDF в snapshot после confirm в UI.
+ */
+async function confirmPdfDraft(pool, { file, projectId, scenarioId, headers, rows, sheetName = null }) {
+    if (!pool) return { ok: false, errors: ['pool required'] };
+    if (!file?.buffer) return { ok: false, errors: ['file.buffer required'] };
+    if (!Array.isArray(headers) || headers.length < 1) {
+        return { ok: false, errors: ['headers required'] };
+    }
+    if (!Array.isArray(rows) || rows.length < 1) {
+        return { ok: false, errors: ['rows required'] };
+    }
+    const imported = await importTableToSnapshot(pool, {
+        file,
+        projectId,
+        scenarioId: scenarioId || 'pdf_extracted',
+        headers,
+        rows,
+        sheetName,
+    });
+    return {
+        ok: true,
+        snapshotId: imported.snapshotId,
+        parsePreview: imported.parsePreview,
+        rowCount: imported.rowCount,
+    };
+}
+
 module.exports = {
     parseUniversal,
     parseExcelUniversal,
     parsePdfUniversal,
     buildResponse,
     finalizePdfTable,
+    confirmPdfDraft,
+    importTableToSnapshot,
+    applyForcedPdfKind,
     HIGH_CONFIDENCE,
     PDF_VALIDATION_STRICT,
 };
