@@ -22,6 +22,15 @@ const DEFAULT_MEASURES = [
 
 const COST_ONLY_MEASURES = ['cost_open', 'cost_close'];
 
+/** Формат ТЗ ФАС / мэппинг: остаточная на начало → амортизация → остаточная на конец */
+const FAS_TZ_MEASURES = ['residual_open', 'amort_charge', 'residual_close'];
+
+const TZ_MEASURE_LABELS = {
+    residual_open: 'начало',
+    amort_charge: 'амортизация',
+    residual_close: 'конец',
+};
+
 function loadPresetDescriptors() {
     const files = fs.readdirSync(PRESETS_DIR).filter((f) => f.endsWith('.json'));
     return files.map((f) => JSON.parse(fs.readFileSync(path.join(PRESETS_DIR, f), 'utf8')));
@@ -43,6 +52,13 @@ function getTreeSample(layoutMeta) {
 }
 
 function hasDeepTree(layoutMeta) {
+    if (
+        layoutMeta?.structure_id === 'tree_os_08' ||
+        layoutMeta?.recommended?.profile_hint === 'os_osv_08' ||
+        layoutMeta?.column_catalog?.layout_type === 'hierarchy_osv'
+    ) {
+        return false;
+    }
     const sample = getTreeSample(layoutMeta);
     return sample.some((r) => Array.isArray(r.path) && r.path.length >= 2);
 }
@@ -89,8 +105,26 @@ function detectSuggestedScenario(layoutMeta, target) {
     if (target?.headers?.length) {
         return { scenarioId: 'from_target', needsUserChoice: false };
     }
+    const structureId =
+        layoutMeta?.structure_id ||
+        layoutMeta?.structure?.structure_id ||
+        layoutMeta?.ontology?.suggested_structure_id;
+    if (structureId === 'tree_os_08') {
+        return { scenarioId: 'os_08_osv', needsUserChoice: false };
+    }
+    if (structureId === 'tree_account_76') {
+        return { scenarioId: 'os_76_account_card', needsUserChoice: false };
+    }
+    const ontology = layoutMeta?.ontology;
+    if (ontology?.parser_rule?.scenarioId) {
+        return { scenarioId: ontology.parser_rule.scenarioId, needsUserChoice: false };
+    }
     const layoutType = layoutMeta?.recommended?.layout_type || layoutMeta?.column_catalog?.layout_type;
-    if (layoutMeta?.recommended?.profile_hint === 'uk_card' || layoutType === 'fixed_columns' && layoutMeta?.column_catalog?.uk_quantity_detect) {
+    if (
+        layoutMeta?.recommended?.profile_hint === 'uk_card' ||
+        ontology?.row_pattern === 'bu_kol_pairs' ||
+        (layoutType === 'fixed_columns' && layoutMeta?.column_catalog?.uk_quantity_detect)
+    ) {
         return { scenarioId: 'uk_card', needsUserChoice: false };
     }
     if (layoutMeta?.recommended?.profile_hint === 'os_wide_years' || layoutType === 'wide_metrics') {
@@ -165,18 +199,23 @@ function metricsFromCatalog(catalog, year, allowedMeasures) {
         if (!m.suggested_measure || !allowedMeasures.includes(m.suggested_measure)) continue;
         if (seen.has(m.suggested_measure)) continue;
         seen.add(m.suggested_measure);
-        const label = (m.header_path || []).join(' — ') || m.suggested_measure;
+        const label =
+            TZ_MEASURE_LABELS[m.suggested_measure] ||
+            (m.header_path || []).join(' — ') ||
+            m.suggested_measure;
         cols.push({
             target: `${year} - ${label}`,
             source: { type: 'metric', measure: m.suggested_measure },
         });
     }
     if (cols.length === 0 && allowedMeasures.includes('residual_close')) {
-        cols.push(
-            { target: `${year} - остаточная на конец`, source: { type: 'metric', measure: 'residual_close' } },
-            { target: `${year} - начисление амортизации`, source: { type: 'metric', measure: 'amort_charge' } },
-            { target: `${year} - стоимость на конец`, source: { type: 'metric', measure: 'cost_close' } }
-        );
+        for (const measure of allowedMeasures) {
+            const label = TZ_MEASURE_LABELS[measure] || measure;
+            cols.push({
+                target: `${year} - ${label}`,
+                source: { type: 'metric', measure },
+            });
+        }
     }
     return cols;
 }
@@ -185,18 +224,18 @@ function buildFlatColumns(catalog, year) {
     return [
         { target: 'год', source: { type: 'hierarchy_field', field: 'year' } },
         { target: 'тип', source: { type: 'hierarchy_field', field: 'asset_name' } },
-        ...metricsFromCatalog(catalog, year, DEFAULT_MEASURES),
+        ...metricsFromCatalog(catalog, year, FAS_TZ_MEASURES),
     ];
 }
 
 function buildHierarchyColumns(catalog, year) {
     return [
-        { target: 'Год', source: { type: 'hierarchy_field', field: 'year' } },
+        { target: 'Юрлицо', source: { type: 'entity_from_header' } },
         { target: 'Группа', source: { type: 'hierarchy_field', field: 'group' } },
         { target: 'Узел', source: { type: 'hierarchy_field', field: 'unit' } },
         { target: 'Подразделение', source: { type: 'hierarchy_field', field: 'subdivision' } },
         { target: 'ОС', source: { type: 'hierarchy_field', field: 'asset_name' } },
-        ...metricsFromCatalog(catalog, year, DEFAULT_MEASURES),
+        ...metricsFromCatalog(catalog, year, FAS_TZ_MEASURES),
     ];
 }
 
@@ -233,16 +272,63 @@ function applyScenario(scenarioId, layoutMeta, target) {
         if (skip != null) {
             rule.layout.skip_rows = skip;
         }
+
+        const columnRoles = {
+            period: probe?.period_column,
+            document: probe?.document_column,
+            analytics: probe?.analytics_column,
+            analytics_kt: probe?.analytics_kt_column,
+            indicator: probe?.indicator_column,
+            debit_account: probe?.debit_account_column,
+            amount: probe?.amount_column,
+            credit_account: probe?.credit_account_column,
+            balance_side: probe?.balance_side_column,
+            balance: probe?.balance_column,
+        };
+        for (const [role, col] of Object.entries(columnRoles)) {
+            if (col == null) continue;
+            rule.column_map[role] = col;
+        }
         if (probe?.indicator_column != null) {
-            rule.column_map.indicator = probe.indicator_column;
             rule.multi_row.indicator_column = probe.indicator_column;
         }
-        if (probe?.document_column != null && probe.has_document_column) {
-            rule.column_map.document = probe.document_column;
+        if (probe?.amount_column != null) {
+            rule.multi_row.amount_column = probe.amount_column;
+        }
+        if (probe?.balance_column != null) {
+            rule.multi_row.balance_column = probe.balance_column;
+            rule.column_map.balance = probe.balance_column;
+        }
+        if (probe?.balance_side_column != null) {
+            rule.multi_row.balance_side_column = probe.balance_side_column;
+            rule.column_map.balance_side = probe.balance_side_column;
+        }
+        const balBuCol = rule.columns.find((c) => c.target === 'current_balance_bu');
+        const balQtyCol = rule.columns.find((c) => c.target === 'current_balance_qty');
+        if (balBuCol && probe?.balance_column != null) balBuCol.source.column = probe.balance_column;
+        if (balQtyCol && probe?.balance_column != null) balQtyCol.source.column = probe.balance_column;
+        if (probe?.document_column != null && probe.has_document_column !== false) {
             const docCol = rule.columns.find((c) => c.target === 'document');
             const opCol = rule.columns.find((c) => c.target === 'operation_type');
             if (docCol) docCol.source.column = probe.document_column;
             if (opCol) opCol.source.column = probe.document_column;
+        }
+        const colTargetMap = {
+            period: 'period',
+            document: 'document',
+            name: 'analytics',
+            'Аналитика Дт': 'analytics',
+            'Аналитика Кт': 'analytics_kt',
+            amount: 'amount',
+            quantity: 'quantity',
+            debit_account: 'debit_account',
+            credit_account: 'credit_account',
+        };
+        for (const [target, role] of Object.entries(colTargetMap)) {
+            const col = columnRoles[role === 'analytics' ? 'analytics' : role];
+            if (col == null) continue;
+            const colDef = rule.columns.find((c) => c.target === target);
+            if (colDef?.source?.type === 'fixed_cell') colDef.source.column = col;
         }
         if (layoutMeta?.sheetName) {
             rule.meta.sheet_name = layoutMeta.sheetName;

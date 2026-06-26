@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PdfParseScenarioV3",
+  "type": "object",
+  "required": ["rule_schema_version", "meta", "layout", "columns"],
+  "properties": {
+    "rule_schema_version": { "const": 3 },
+    "meta": {
+      "type": "object",
+      "required": ["name", "source_type"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "source_type": { "const": "pdf" },
+        "doc_kind": { "type": "string" },
+        "broker_subtype": { "type": "string" },
+        "section_id": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "detection": {
+      "type": "object",
+      "properties": {
+        "markers": { "type": "array", "items": { "type": "string" } },
+        "filename_patterns": { "type": "array", "items": { "type": "string" } },
+        "min_marker_hits": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "layout": {
+      "type": "object",
+      "required": ["engine"],
+      "properties": {
+        "engine": { "enum": ["pdfjs_grid", "regex_rows", "line_anchors"] },
+        "section_start": {
+          "type": "object",
+          "properties": {
+            "pattern": { "type": "string", "maxLength": 200 },
+            "match": { "enum": ["row", "page"] }
+          }
+        },
+        "section_end": {
+          "type": "object",
+          "properties": {
+            "pattern": { "type": "string", "maxLength": 200 },
+            "match": { "enum": ["row", "page"] }
+          }
+        },
+        "page_width_pt": { "type": "number", "minimum": 1 },
+        "data_start_row": { "type": "integer", "minimum": 0 },
+        "header_row_count": { "type": "integer", "minimum": 0 },
+        "x_tol_norm": { "type": "number", "minimum": 0 }
+      }
+    },
+    "columns": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["index", "target", "center_norm"],
+        "properties": {
+          "index": { "type": "integer", "minimum": 0 },
+          "target": { "type": "string", "minLength": 1 },
+          "label": { "type": "string" },
+          "description": { "type": "string" },
+          "center_norm": { "type": "number", "minimum": 0, "maximum": 1 },
+          "type": { "type": "string" }
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "properties": {
+        "min_rows": { "type": "integer", "minimum": 0 },
+        "expected_column_count": { "type": "integer", "minimum": 1 },
+        "fixture_file": { "type": "string" },
+        "expected_row_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

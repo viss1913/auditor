@@ -1,4 +1,5 @@
 const { detectSourceKind } = require('./file_dispatch');
+const { probePdfKind } = require('./pdf_probe');
 const { analyzeLayout } = require('./analyze_layout');
 const { parse1cTsvExport } = require('./parse_1c_tsv');
 const { loadTargetRows } = require('./compare_target');
@@ -62,18 +63,129 @@ function resolveExcelScenario(layoutMeta, target, orchestratorAnswers = {}) {
     };
 }
 
+async function resolvePdfUpload({ buffer, fileName }) {
+    const pdfProbe = await probePdfKind(buffer, fileName);
+    const kind = pdfProbe.kind;
+    const confidence = pdfProbe.confidence ?? 0.5;
+
+    if (kind === 'upd_ediweb') {
+        return {
+            ok: true,
+            route: 'universal_pdf',
+            sourceKind: 'pdf',
+            scenarioId: 'upd_ediweb',
+            profileId: 'pavel',
+            confidence,
+            scenarioName: scenarioDisplayName('upd_ediweb'),
+            layoutMeta: {
+                sourceKind: 'pdf',
+                sourceFileName: fileName,
+                pdfProbe,
+                recommended: {
+                    layout_type: 'fixed_rows',
+                    profile_hint: 'upd_ediweb',
+                    description: scenarioDisplayName('upd_ediweb'),
+                    confidence,
+                    fingerprint_reason: `pdfKind=${kind}`,
+                },
+            },
+            needsTreeConfirm: false,
+            autoReady: confidence >= 0.85,
+        };
+    }
+
+    if (kind === 'broker_report') {
+        return {
+            ok: true,
+            route: 'universal_pdf',
+            sourceKind: 'pdf',
+            scenarioId: 'broker_pdf',
+            profileId: 'pavel',
+            confidence,
+            scenarioName: scenarioDisplayName('broker_pdf'),
+            layoutMeta: {
+                sourceKind: 'pdf',
+                sourceFileName: fileName,
+                pdfProbe,
+                recommended: {
+                    layout_type: 'fixed_rows',
+                    profile_hint: 'broker_pdf',
+                    description: scenarioDisplayName('broker_pdf'),
+                    confidence,
+                    fingerprint_reason: `pdfKind=${kind}`,
+                },
+            },
+            needsTreeConfirm: false,
+            autoReady: false,
+        };
+    }
+
+    if (kind === 'depo') {
+        return {
+            ok: true,
+            route: 'opif',
+            sourceKind: 'pdf',
+            scenarioId: 'opif_depo',
+            profileId: 'opif_depo',
+            confidence,
+            scenarioName: scenarioDisplayName('opif_depo'),
+            layoutMeta: {
+                sourceKind: 'pdf',
+                sourceFileName: fileName,
+                pdfProbe,
+                recommended: {
+                    layout_type: 'fixed_rows',
+                    profile_hint: 'opif_depo',
+                    description: scenarioDisplayName('opif_depo'),
+                    confidence,
+                },
+            },
+            needsTreeConfirm: false,
+            autoReady: true,
+        };
+    }
+
+    return {
+        ok: true,
+        route: 'universal_pdf',
+        sourceKind: 'pdf',
+        scenarioId: 'unknown_pdf',
+        profileId: 'pavel',
+        confidence: 0.3,
+        scenarioName: 'PDF (неизвестный формат)',
+        layoutMeta: {
+            sourceKind: 'pdf',
+            sourceFileName: fileName,
+            pdfProbe,
+            recommended: {
+                layout_type: 'fixed_rows',
+                profile_hint: 'unknown_pdf',
+                description: 'PDF: требуется правило извлечения',
+                confidence: 0.3,
+            },
+        },
+        needsTreeConfirm: false,
+        autoReady: false,
+    };
+}
+
 function shouldRequireTreeConfirm(layoutMeta, scenarioId, orchestratorAnswers = {}) {
-    void layoutMeta;
-    void scenarioId;
-    void orchestratorAnswers;
-    return false;
+    if (orchestratorAnswers.pick_tree_flatten) return false;
+    try {
+        const { isSmartDialogEnabled } = require('./martin_flags');
+        const { shouldAutoFlattenTree } = require('./autostart_defaults');
+        if (!isSmartDialogEnabled()) return false;
+        return shouldAutoFlattenTree(layoutMeta);
+    } catch {
+        return false;
+    }
 }
 
 /**
  * Единая точка: файл → сценарий и метаданные.
  * @param {{ buffer: Buffer, fileName: string, sheetName?: string, targetBuffer?: Buffer, orchestratorAnswers?: Object }} input
  */
-function resolveUpload(input) {
+async function resolveUpload(input) {
     const {
         buffer,
         fileName,
@@ -85,27 +197,7 @@ function resolveUpload(input) {
     const sourceKind = detectSourceKind(fileName);
 
     if (sourceKind === 'pdf') {
-        return {
-            ok: true,
-            route: 'opif',
-            sourceKind,
-            scenarioId: 'opif_depo',
-            profileId: 'opif_depo',
-            confidence: 1,
-            scenarioName: scenarioDisplayName('opif_depo'),
-            layoutMeta: {
-                sourceKind: 'pdf',
-                sourceFileName: fileName,
-                recommended: {
-                    layout_type: 'fixed_rows',
-                    profile_hint: 'opif_depo',
-                    description: scenarioDisplayName('opif_depo'),
-                    confidence: 1,
-                },
-            },
-            needsTreeConfirm: false,
-            autoReady: true,
-        };
+        return await resolvePdfUpload({ buffer, fileName });
     }
 
     if (sourceKind === 'unknown') {
@@ -191,6 +283,7 @@ function resolveUpload(input) {
 
 module.exports = {
     resolveUpload,
+    resolvePdfUpload,
     resolveExcelScenario,
     shouldRequireTreeConfirm,
     mapTextProfileToScenario,

@@ -1,4 +1,5 @@
-const { runParseFull, withTempFile, PREVIEW_ROWS_CLIENT } = require('./parse_preview');
+const { runParseFull, withTempFile } = require('./parse_preview');
+const { CLIENT_PREVIEW_ROWS } = require('./client_response_sanitize');
 const { createParseSnapshotStore } = require('./parse_snapshot_store');
 
 /**
@@ -12,6 +13,8 @@ async function importFileToSnapshot(pool, {
     sheetName = null,
     scenarioId = null,
     ruleId = null,
+    parseResult = null,
+    sheetLoad = null,
 }) {
     const store = createParseSnapshotStore(pool);
     const snapshotId = await store.createSnapshot({
@@ -25,36 +28,43 @@ async function importFileToSnapshot(pool, {
     });
 
     try {
-        const parseResult = withTempFile(fileBuffer, fileName, (tmpPath) => runParseFull(tmpPath, rule));
-        if (!parseResult.ok) {
+        let parsed = parseResult;
+        if (!parsed?.ok) {
+            const engineOpts = sheetLoad ? { sheetLoad } : {};
+            parsed = sheetLoad
+                ? runParseFull(null, rule, engineOpts)
+                : withTempFile(fileBuffer, fileName, (tmpPath) => runParseFull(tmpPath, rule));
+        }
+        if (!parsed.ok) {
             await store.setSnapshotStatus(snapshotId, 'failed', {
-                errorMessage: parseResult.errors.join('; '),
+                errorMessage: parsed.errors.join('; '),
             });
             return {
                 ok: false,
                 snapshotId,
-                errors: parseResult.errors,
+                errors: parsed.errors,
                 warnings: [],
             };
         }
 
         const rowCount = await store.importParsedRows(
             snapshotId,
-            parseResult.headers,
-            parseResult.rows
+            parsed.headers,
+            parsed.rows
         );
 
-        const previewRows = parseResult.rows.slice(0, PREVIEW_ROWS_CLIENT);
+        const previewRows = parsed.rows.slice(0, CLIENT_PREVIEW_ROWS);
         return {
             ok: true,
             snapshotId,
             parsePreview: {
-                headers: parseResult.headers,
+                ok: true,
+                headers: parsed.headers,
                 rows: previewRows,
                 rowCount,
             },
-            warnings: parseResult.warnings || [],
-            rule: parseResult.rule,
+            warnings: parsed.warnings || [],
+            rule: parsed.rule,
         };
     } catch (err) {
         await store.setSnapshotStatus(snapshotId, 'failed', { errorMessage: err.message });
@@ -62,4 +72,4 @@ async function importFileToSnapshot(pool, {
     }
 }
 
-module.exports = { importFileToSnapshot, PREVIEW_ROWS_CLIENT };
+module.exports = { importFileToSnapshot, PREVIEW_ROWS_CLIENT: CLIENT_PREVIEW_ROWS };

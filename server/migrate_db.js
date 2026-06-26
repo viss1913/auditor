@@ -53,6 +53,16 @@ const migrate = async () => {
         await pool.query(PARSE_SNAPSHOT_DDL);
         console.log('Таблицы parse_snapshots / parsed_rows / table_operations проверены.');
 
+        const { PDF_PARSE_SCENARIOS_DDL } = require('./universal_parse/pdf_parse_scenario_store');
+        await pool.query(PDF_PARSE_SCENARIOS_DDL);
+        console.log('Таблица pdf_parse_scenarios проверена/создана.');
+
+        await pool.query(`
+            ALTER TABLE table_operations
+            ADD COLUMN IF NOT EXISTS rollback_payload JSONB;
+        `);
+        console.log('Колонка rollback_payload в table_operations проверена.');
+
         await pool.query(`
             ALTER TABLE chat_history
             ADD COLUMN IF NOT EXISTS chat_session_id INTEGER REFERENCES chat_sessions(id) ON DELETE CASCADE;
@@ -60,7 +70,10 @@ const migrate = async () => {
         await pool.query(`
             CREATE INDEX IF NOT EXISTS idx_chat_history_session ON chat_history(chat_session_id);
         `);
-        console.log('Колонка chat_session_id в chat_history проверена.');
+        const { ensureAuditorsSchema } = require('./auditor_schema');
+        await ensureAuditorsSchema(pool);
+        const { ensureUsersSchema } = require('./user_schema');
+        await ensureUsersSchema(pool);
 
         console.log('Миграция успешно завершена!');
     } catch (err) {

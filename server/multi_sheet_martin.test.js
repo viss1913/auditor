@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const {
     shouldParseAllSheets,
+    wantsMultiSheetExcelParse,
     parseAllExcelSheets,
     isInstructionSheet,
 } = require('./multi_sheet_martin');
@@ -28,10 +29,33 @@ describe('multi_sheet_martin', () => {
         assert.equal(
             shouldParseAllSheets({
                 files: [file],
+                sheetName: 'Исходная ОСВ',
+                orchestratorAnswers: {},
+            }),
+            true
+        );
+        assert.equal(
+            shouldParseAllSheets({
+                files: [file],
                 orchestratorAnswers: { pick_tree_flatten: 'scenario:os_08_osv' },
             }),
             false
         );
+    });
+
+    it('shouldParseAllSheets: тяжёлый файл — только явный parseAllSheets', () => {
+        const buf = fs.readFileSync(FIXTURE);
+        const file = { buffer: buf, originalname: 'big.xlsx' };
+        const huge = {
+            buffer: Buffer.alloc(7 * 1024 * 1024),
+            originalname: 'big.xlsx',
+        };
+        assert.equal(shouldParseAllSheets({ files: [huge], orchestratorAnswers: {} }), false);
+        assert.equal(
+            shouldParseAllSheets({ files: [huge], parseAllSheets: true, orchestratorAnswers: {} }),
+            true
+        );
+        assert.equal(shouldParseAllSheets({ files: [file], orchestratorAnswers: {} }), true);
     });
 
     it('isInstructionSheet распознаёт лист-пояснение', () => {
@@ -60,6 +84,21 @@ describe('multi_sheet_martin', () => {
                 recommended: { layout_type: 'fixed_columns' },
             }),
             false
+        );
+    });
+
+    it('wantsMultiSheetExcelParse: мультилист без явного sheetName', () => {
+        const buf = fs.readFileSync(FIXTURE);
+        const file = { buffer: buf, originalname: 'Пример по сч 76.xlsx' };
+        const { listSheetNames } = require('./excel_preview');
+        const { sheetNames } = listSheetNames(buf);
+        assert.equal(
+            wantsMultiSheetExcelParse({
+                files: [file],
+                sheetNames,
+                orchestratorAnswers: {},
+            }),
+            true
         );
     });
 

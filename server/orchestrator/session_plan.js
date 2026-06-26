@@ -4,7 +4,10 @@ const {
     getTreeSample,
     isAccountCard76,
     inferScenarioFromRule,
+    buildScenarioChoiceMessage,
 } = require('../scenarios/registry');
+const { shouldAutoFlattenTree } = require('../autostart_defaults');
+const { isSmartDialogEnabled } = require('../martin_flags');
 const { resolveStructureFromMessage } = require('./structure_resolve');
 const { detectUkQuantityColumn } = require('./uk_detect');
 const { applyAutostartDefaults } = require('../autostart_defaults');
@@ -163,7 +166,27 @@ function buildSessionPlan(layoutMeta, target, currentRule, opts = {}) {
         }
     }
 
+    const smartDialog = isSmartDialogEnabled();
     if (
+        smartDialog &&
+        detected.needsUserChoice &&
+        !state.scenarioId &&
+        !currentRule &&
+        !target?.headers?.length &&
+        !effectiveAnswers.scenarioId &&
+        !effectiveAnswers.pick_scenario
+    ) {
+        pendingQuestions.push(
+            buildQuestion(
+                'pick_scenario',
+                buildScenarioChoiceMessage(layoutMeta),
+                [
+                    { value: 'os_01_flat', label: 'Плоская — тип + метрики' },
+                    { value: 'os_01_hierarchy', label: 'С иерархией — группа, узел, ОП, ОС' },
+                ]
+            )
+        );
+    } else if (
         detected.needsUserChoice &&
         !state.scenarioId &&
         !currentRule &&
@@ -172,6 +195,34 @@ function buildSessionPlan(layoutMeta, target, currentRule, opts = {}) {
     ) {
         state.scenarioId = detected.scenarioId || 'os_01_hierarchy';
         autoResolved.scenarioId = state.scenarioId;
+    }
+
+    if (
+        smartDialog &&
+        pendingQuestions.length === 0 &&
+        shouldAutoFlattenTree(layoutMeta) &&
+        !effectiveAnswers.pick_tree_flatten
+    ) {
+        const treeInf = layoutMeta?.tree_inference;
+        const treeExamples = getTreeSample(layoutMeta)
+            .slice(0, 3)
+            .map(
+                (r) =>
+                    `• ${[...(r.path || []), r.leaf_name].filter(Boolean).join(' → ')}`
+            )
+            .join('\n');
+        pendingQuestions.push(
+            buildQuestion(
+                'pick_tree_flatten',
+                `Вижу дерево: **${(treeInf?.levelLabels || []).join(' → ')}**\n\n` +
+                    (treeExamples ? `${treeExamples}\n\n` : '') +
+                    'Развернуть в плоскую таблицу (каждый объект — строка, предки в колонках)?',
+                [
+                    { value: 'confirm', label: 'Да, развернуть так' },
+                    { value: 'scenario:os_08_osv', label: 'Нет, это ОСВ 08' },
+                ]
+            )
+        );
     }
 
     if (state.profileId === 'uk_card') {
@@ -307,6 +358,10 @@ function applyAnswer(plan, questionId, value) {
             ...(state.answers.compositeExtracts || []),
             value,
         ];
+    }
+    if (questionId === 'pick_merge_strategy') {
+        state.answers.mergeStrategy = value;
+        state.answers.pick_merge_strategy = value;
     }
 
     return buildSessionPlan(plan.layoutMeta, plan.target, plan.currentRule, {

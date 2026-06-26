@@ -24,6 +24,8 @@ function resolveColumnHint(hint, headers) {
             год: 'Год',
             тип: 'тип',
             наименование: 'ОС',
+            объект: 'Объект',
+            обьект: 'Объект',
         };
         const alias = aliasMap[requestedNorm];
         if (alias) hit = headerNorms.find((x) => x.norm === normalizeText(alias))?.header;
@@ -48,10 +50,19 @@ const COLUMN_ALIASES = {
     debit_account: ['debit_account', 'дебет', 'дт', 'счет дт', 'счёт дт'],
     credit_account: ['credit_account', 'кредит', 'кт', 'счет кт', 'счёт кт'],
     operation_type: ['operation_type', 'операция', 'тип операции', 'вид операции'],
-    name: ['name', 'наименование', 'бумага', 'ценная бумага'],
+    name: ['name', 'наименование'],
+    instrument: ['instrument', 'инструмент', 'бумага', 'ценная бумага', 'актив'],
     quantity: ['quantity', 'количество', 'кол'],
     amount: ['amount', 'сумма', 'б у', 'бу'],
     period: ['period', 'дата', 'период'],
+    counterparty: ['counterparty', 'контрагент'],
+    document: ['document', 'документ'],
+    description: ['description', 'описание', 'описание операции'],
+    deal: ['deal', 'сделка', 'номер сделки', '№ сделки'],
+    portfolio: ['portfolio', 'портфель'],
+    broker_account: ['broker_account', 'счет', 'счёт', 'номер брокерского счета клиента'],
+    contract: ['contract', 'договор', 'договор о брокерском обслуживании'],
+    sum_rub: ['sum_rub', 'сумма', 'сумма руб', 'сумма, руб.'],
 };
 
 function resolveFilterColumn(hint, headers) {
@@ -69,20 +80,27 @@ function resolveFilterColumn(hint, headers) {
         }
         if (aliases.some((a) => normalizeText(a) === norm || norm.includes(normalizeText(a)))) {
             if (headers?.includes(canonical)) return canonical;
-            return canonical;
+            const headerHit = headers?.find((h) => normalizeText(h) === norm || aliases.some((a) => normalizeText(a) === normalizeText(h)));
+            if (headerHit) return headerHit;
         }
     }
-    return fromHint || (headers?.includes(h) ? h : null);
+    return fromHint || (headers?.includes(h) ? h : isSafeColumnName(h) ? h : null);
 }
 
 function isSafeColumnName(name) {
     return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(String(name || ''));
 }
 
+function isAllowedFilterColumn(column, headers) {
+    if (!column) return false;
+    if (headers?.includes(column)) return true;
+    return isSafeColumnName(column);
+}
+
 function sanitizeFilterClause(raw, headers) {
     if (!raw || typeof raw !== 'object') return null;
     const column = resolveFilterColumn(raw.column || raw.col, headers);
-    if (!column || !isSafeColumnName(column)) return null;
+    if (!isAllowedFilterColumn(column, headers)) return null;
 
     let op = String(raw.op || raw.operator || 'eq').trim().toLowerCase();
     if (!ALLOWED_OPS.has(op)) op = 'eq';
@@ -113,6 +131,18 @@ function sanitizeFilterPlan(raw, headers) {
     return { mode, combine, filters };
 }
 
+function matchesDimensionValue(cell, value) {
+    const c = normalizeText(cell);
+    const v = normalizeText(value);
+    if (!c || !v) return false;
+    if (c === v) return true;
+    if (/^\d+$/.test(v)) {
+        const tokens = c.split(/\s+/).filter(Boolean);
+        return tokens.length > 0 && tokens[tokens.length - 1] === v;
+    }
+    return false;
+}
+
 function rowMatchesFilter(row, clause) {
     const raw = row?.[clause.column];
     const cell = raw == null ? '' : String(raw).trim();
@@ -120,6 +150,7 @@ function rowMatchesFilter(row, clause) {
 
     switch (clause.op) {
         case 'eq':
+            if (matchesDimensionValue(cell, val)) return true;
             return cell === val || cell.startsWith(val);
         case 'ne':
             return cell !== val && !cell.startsWith(val);
@@ -224,8 +255,8 @@ function buildJsonbCondition(clause, paramOffset) {
 /**
  * SQL для DELETE строк snapshot: mode keep → удалить НЕ совпадающие; remove → удалить совпадающие.
  */
-function buildFilterDeleteQuery(snapshotId, plan) {
-    const { mode, combine, filters } = sanitizeFilterPlan(plan, []);
+function buildFilterDeleteQuery(snapshotId, plan, headers = []) {
+    const { mode, combine, filters } = sanitizeFilterPlan(plan, headers);
     if (!filters.length) {
         return { sql: null, params: [], plan: { mode, combine, filters } };
     }
@@ -291,10 +322,144 @@ function extractQuotedOrPlainValue(raw) {
     return s.replace(/\s+(?:и|а)\s+[a-z_][a-z0-9_]*\s*=.*$/i, '').trim();
 }
 
+function isNotEmptyFilterSignal(text) {
+    const t = String(text || '');
+    return (
+        /есть\s+значен/i.test(t) ||
+        /заполнен\w*/i.test(t) ||
+        /не\s+пуст\w*/i.test(t) ||
+        /непуст\w*/i.test(t) ||
+        /has\s+value/i.test(t) ||
+        /not\s+empty/i.test(t)
+    );
+}
+
+function isRowFilterIntent(text) {
+    const t = String(text || '');
+    return (
+        /фильтр/i.test(t) ||
+        /оставь\s+(?:только|строк)/i.test(t) ||
+        /только\s+(?:строк|если|где|по)/i.test(t) ||
+        /(?:убер|удал)\w*\s+(?:все\s+)?(?:строч\w*|строк\w*)/i.test(t) ||
+        /исключ\w*\s+(?:все\s+)?(?:строч\w*|строк\w*)/i.test(t) ||
+        /where\s+/i.test(t) ||
+        /(?:где|если)\s+.+(?:пуст\w*|пусто|не\s+заполн)/i.test(t) ||
+        (isNotEmptyFilterSignal(t) && /(?:колонк|где|если|оставь|только|строк)/i.test(t)) ||
+        /\bname\s*=/i.test(t) ||
+        /debit[_\s]?account\s*=/i.test(t) ||
+        /credit[_\s]?account\s*=/i.test(t)
+    );
+}
+
+function isRowFilterNotColumnEdit(text) {
+    const t = String(text || '');
+    return (
+        /(?:убер|удал)\w*\s+(?:все\s+)?(?:строч\w*|строк\w*)\s+где/i.test(t) ||
+        /(?:где|если)\s+.+(?:пуст\w*|пусто|не\s+заполн)/i.test(t)
+    );
+}
+
+function extractColumnHintFromFilterPart(part) {
+    let p = String(part || '').trim();
+    p = p
+        .replace(/\s+(?:не\s+)?пуст\w*\.?$/i, '')
+        .replace(/\s+заполнен\w*\.?$/i, '')
+        .trim();
+    const colMatch = p.match(/^(?:в\s+)?(?:колонк[еиуа]\s+)?(.+)$/i);
+    return (colMatch?.[1] || p).trim();
+}
+
+function extractNotEmptyColumnFilters(text, headers) {
+    const t = String(text || '');
+    if (!isNotEmptyFilterSignal(t)) return [];
+
+    const filters = [];
+    const seen = new Set();
+
+    const pushNotEmpty = (hint) => {
+        const col = resolveFilterColumn(String(hint || '').trim(), headers);
+        if (!col || !headers?.includes(col) || seen.has(col)) return;
+        seen.add(col);
+        filters.push({ column: col, op: 'not_empty', value: null });
+    };
+
+    const valueInCol = t.match(
+        /есть\s+значен\w*\s+(?:в\s+)?(?:колонк[еиуа]\s+)?["«']?([^"»'\n,.]+?)["»']?(?:\s|$|\.)/i
+    );
+    if (valueInCol) pushNotEmpty(valueInCol[1]);
+
+    const filledCol = t.match(
+        /(?:колонк[еиуа]\s+)?["«']?([^"»'\n,.]+?)["»']?\s+заполнен\w*/i
+    );
+    if (filledCol) pushNotEmpty(filledCol[1]);
+
+    let tail = t;
+    const where = t.match(/(?:где|если|котор\w*|там\s+где)\s+(.+)$/i);
+    if (where) tail = where[1];
+
+    const parts = tail
+        .split(/\s*,\s*|\s+и\s+(?=(?:в\s+)?(?:колонк[еиуа]\s+)?)/i)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+    for (const part of parts) {
+        if (!/(?:не\s+пуст\w*|заполнен\w*|есть\s+значен)/i.test(part)) continue;
+        const hint = extractColumnHintFromFilterPart(part);
+        if (!hint || /^(где|если|там|есть|значен\w*)$/i.test(hint)) continue;
+        pushNotEmpty(hint);
+    }
+
+    return filters;
+}
+
+function extractEmptyColumnFilters(text, headers) {
+    const t = String(text || '');
+    if (isNotEmptyFilterSignal(t)) return [];
+    if (!/(?:пуст\w*|пусто|не\s+заполн\w*|blank|empty)/i.test(t)) return [];
+
+    let tail = t;
+    const where = t.match(/(?:где|если|котор\w*)\s+(.+)$/i);
+    if (where) tail = where[1];
+
+    const parts = tail
+        .split(/\s*,\s*|\s+и\s+(?=(?:в\s+)?(?:колонк[еиуа]\s+)?)/i)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+    const filters = [];
+    const seen = new Set();
+
+    for (let part of parts) {
+        if (/не\s+пуст\w*/i.test(part)) continue;
+        part = part.replace(/\s+пуст\w*\.?$/i, '').trim();
+        const hint = extractColumnHintFromFilterPart(part);
+        if (!hint || /^(где|если|пуст\w*)$/i.test(hint)) continue;
+        const col = resolveFilterColumn(hint, headers);
+        if (!col || !headers?.includes(col)) continue;
+        if (seen.has(col)) continue;
+        seen.add(col);
+        filters.push({ column: col, op: 'empty', value: null });
+    }
+
+    return filters;
+}
+
 function extractColumnFilters(text, headers) {
     const t = String(text || '');
     const filters = [];
     let mode = /убер\S*|удал\S*|исключ|без\s+строк|не\s+оставляй/i.test(t) ? 'remove' : 'keep';
+
+    for (const clause of extractEmptyColumnFilters(t, headers)) {
+        if (!filters.some((f) => f.column === clause.column && f.op === clause.op)) {
+            filters.push(clause);
+        }
+    }
+
+    for (const clause of extractNotEmptyColumnFilters(t, headers)) {
+        if (!filters.some((f) => f.column === clause.column && f.op === clause.op)) {
+            filters.push(clause);
+        }
+    }
 
     const patterns = [
         {
@@ -356,6 +521,18 @@ function extractColumnFilters(text, headers) {
         }
     }
 
+    const colEqCyrillic =
+        /(?:^|[\s,;—–-])([a-z_а-яё][a-z0-9_а-яё\s]*?)\s*=\s*(?:"([^"]+)"|'([^']+)'|«([^»]+)»|([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9\s.-]+?))(?:\s+и\s+|\s*$|,|\.)/gi;
+    let cc;
+    while ((cc = colEqCyrillic.exec(t)) !== null) {
+        const col = resolveFilterColumn(cc[1].trim(), headers);
+        const val = extractQuotedOrPlainValue(cc[2] || cc[3] || cc[4] || cc[5] || '');
+        if (!col || !val || /^[\d.]+$/.test(val)) continue;
+        if (normalizeText(col) === 'name' && nameMatch) continue;
+        if (filters.some((f) => f.column === col && f.value === val)) continue;
+        filters.push({ column: col, op: inferFilterOp(col, val), value: val });
+    }
+
     const onlyBy = t.match(/только\s+по\s+([a-z_а-яё_]+)\s*[=:]\s*(.+)$/i);
     if (onlyBy && filters.length === 0) {
         const col = resolveFilterColumn(onlyBy[1], headers);
@@ -365,20 +542,142 @@ function extractColumnFilters(text, headers) {
         }
     }
 
+    const colEqualsNatural = t.match(
+        /(?:фильтр\s+)?по\s+колонк[еиуа]\s+["«']?([^"»',\n]+?)["»']?(?:\s*,\s*|\s+)(?:значени[еяю]?\s+)?(?:в\s+)?(?:ячейк[аеи]?\s+)?(?:должн[аоы]?\s+)?(?:быть\s+)?равн[оа]?\s+["«']?([A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9\s._()-]*?)["»']?(?:\s+и\s+|\s*$|\.|,)/i
+    );
+    if (colEqualsNatural) {
+        const col = resolveFilterColumn(colEqualsNatural[1].trim(), headers);
+        const val = extractQuotedOrPlainValue(colEqualsNatural[2]);
+        if (col && val && !filters.some((f) => f.column === col && f.value === val)) {
+            filters.push({ column: col, op: 'eq', value: val });
+        }
+    }
+
     return { mode, filters };
+}
+
+function inferValueFilter(value, headers) {
+    const val = String(value || '').trim();
+    if (!val) return null;
+
+    const candidates = [
+        'name',
+        'instrument',
+        'Инструмент',
+        'security',
+        'counterparty',
+        'operationType',
+        'operation_type',
+        'document',
+        'Документ',
+        'Группа',
+    ];
+    for (const hint of candidates) {
+        const col = resolveFilterColumn(hint, headers);
+        if (col && headers?.includes(col)) {
+            return { column: col, op: 'contains', value: val };
+        }
+    }
+    if (headers?.length) {
+        const col = headers.find((h) => isSafeColumnName(h)) || headers[0];
+        return { column: col, op: 'contains', value: val };
+    }
+    return null;
+}
+
+function extractSplitTableLabel(text) {
+    const t = String(text || '');
+    const quoted =
+        t.match(/(?:таблиц[ауеи]|вкладк[ауеи]|лист)\s+["«']([^"»']+)["»']/i) ||
+        t.match(/(?:назови|название)\s+["«']([^"»']+)["»']/i);
+    if (quoted) return quoted[1].trim();
+
+    const bare = t.match(
+        /(?:таблиц[ауеи]|вкладк[ауеи])\s+(?!и\b|с\b|со\b|где\b|все\b)([A-Za-zА-Яа-яЁё0-9._-]+)/i
+    );
+    if (bare) return bare[1].trim();
+
+    const po = t.match(/(?:данные|строки?)\s+по\s+["«']?([^"»'\n,.]+?)["»']?(?:\s|$|\.)/i);
+    if (po) return po[1].trim();
+
+    return null;
+}
+
+function isSplitToTableIntent(text) {
+    const t = String(text || '').trim();
+    const { looksLikeReconcileIntent } = require('./reconcile_intent');
+    if (looksLikeReconcileIntent(t)) return false;
+    return (
+        /(?:сделай|создай|добавь|открой)\s+(?:новую\s+)?(?:таблиц|вкладк|лист)/i.test(t) ||
+        /(?:сделай|создай|положи|вынеси)\s+(?:результат\s+)?(?:в\s+)?нов[а-яё]+\s+таблиц/i.test(t) ||
+        /(?:результат\s+)?(?:в\s+)?нов[а-яё]+\s+таблиц/i.test(t) ||
+        /нов(?:ую|ая|ый)\s+(?:таблиц|вкладк|лист)/i.test(t) ||
+        /отдельн\w*\s+таблиц/i.test(t) ||
+        /(?:скопируй|перенес\w*)\s+(?:в\s+)?нов/i.test(t) ||
+        /(?:вынеси|вытащи)\s+(?:в\s+)?(?:отдельн|нов)/i.test(t)
+    );
+}
+
+function parseSplitToTableIntent(text, headers = []) {
+    const t = String(text || '').trim();
+    if (!t || !isSplitToTableIntent(t)) return { action: null };
+
+    const tableLabel = extractSplitTableLabel(t);
+    let extracted = extractColumnFilters(t, headers);
+    let filters = extracted.filters;
+
+    if (!filters.length) {
+        const containsMatch = t.match(
+            /(?:где|если)\s+([a-z_а-яё]+)\s+(?:содержит|есть|имеет|=)\s*["«']?([^"»'\n]+?)(?:\s+и\s+(?:перенес|туда|найден)|\s*$|\.)/i
+        );
+        if (containsMatch) {
+            const col = resolveFilterColumn(containsMatch[1], headers);
+            const val = extractQuotedOrPlainValue(containsMatch[2]);
+            if (col && val) {
+                filters = [{ column: col, op: inferFilterOp(col, val), value: val }];
+            }
+        }
+    }
+
+    if (!filters.length) {
+        const poMatch = t.match(
+            /(?:все\s+)?(?:данные|строки?)?\s*по\s+["«']?([^"»'\n,.]+?)["»']?(?:\s+из|\s+где|\s+где|\s*$|\.)/i
+        );
+        if (poMatch) {
+            const clause = inferValueFilter(poMatch[1].trim(), headers);
+            if (clause) filters = [clause];
+        }
+    }
+
+    return {
+        action: 'split_to_table',
+        tableLabel,
+        mode: extracted.mode || 'keep',
+        filters,
+        combine: 'and',
+        planner: filters.length ? 'regex' : 'regex',
+    };
+}
+
+function buildSplitAssistantMessage(plan, { tableLabel, rowCount = 0, sourceRowCount = 0 } = {}) {
+    const summary = formatFilterSummary(plan);
+    const title = tableLabel ? `«${tableLabel}»` : 'новая таблица';
+    if (!rowCount) {
+        return `**${title}:** ${summary}.\n\nПодходящих строк не нашла — вкладка пустая. Исходная таблица не изменена.`;
+    }
+    return (
+        `**${title}:** ${summary}.\n\n` +
+        `Скопировала **${rowCount}** строк из **${sourceRowCount}** в новую вкладку. Исходная таблица не изменена.`
+    );
 }
 
 function parseFilterIntent(text, headers = []) {
     const t = String(text || '').trim();
     if (!t) return { action: null };
+    if (isSplitToTableIntent(t)) return { action: null };
 
     const filterIntent =
-        /фильтр|оставь\s+(?:только|строк)|только\s+(?:строк|если|где|по)|убери\s+строк|удали\s+строк|исключи\s+строк|where\s+/i.test(
-            t
-        ) ||
-        /\bname\s*=/i.test(t) ||
-        /debit[_\s]?account\s*=/i.test(t) ||
-        /credit[_\s]?account\s*=/i.test(t) ||
+        isRowFilterIntent(t) ||
         isFilterContinuation(t) ||
         (/(?:дт|кт|дебет|кредит)\s*[=:]?\s*[\d.]+/i.test(t) &&
             /(?:оставь|только|фильтр|убери|удали)/i.test(t));
@@ -407,8 +706,14 @@ function parseFilterIntent(text, headers = []) {
     };
 }
 
-function formatFilterSummary(plan) {
-    const { mode, filters, combine } = sanitizeFilterPlan(plan, []);
+function formatFilterSummary(plan, headers = null) {
+    const modeRaw = String(plan?.mode || 'keep').trim().toLowerCase();
+    const mode = modeRaw === 'remove' || modeRaw === 'drop' || modeRaw === 'exclude' ? 'remove' : 'keep';
+    const combine = String(plan?.combine || 'and').trim().toLowerCase() === 'or' ? 'or' : 'and';
+    let filters = headers ? sanitizeFilterPlan(plan, headers).filters : [];
+    if (!filters.length && Array.isArray(plan?.filters)) {
+        filters = plan.filters.filter((f) => f?.column && f?.op);
+    }
     if (!filters.length) return 'фильтр без условий';
     const cond = filters
         .map((f) => {
@@ -438,10 +743,21 @@ module.exports = {
     applyFilterToRows,
     buildFilterDeleteQuery,
     inferFilterOp,
+    inferValueFilter,
     isFilterContinuation,
+    isSplitToTableIntent,
     mergeFilterPlans,
     extractColumnFilters,
+    extractEmptyColumnFilters,
+    extractNotEmptyColumnFilters,
+    isNotEmptyFilterSignal,
+    isRowFilterIntent,
+    isRowFilterNotColumnEdit,
+    extractSplitTableLabel,
+    parseSplitToTableIntent,
     parseFilterIntent,
     formatFilterSummary,
     buildFilterAssistantMessage,
+    buildSplitAssistantMessage,
+    matchesDimensionValue,
 };

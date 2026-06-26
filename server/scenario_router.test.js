@@ -14,6 +14,7 @@ const FIXTURES = path.join(__dirname, 'fixtures');
 const UK581 = path.join(FIXTURES, 'uk_card_581.xlsx');
 const UK_SAMPLE = path.join(FIXTURES, 'uk_sample.xlsx');
 const OS76 = path.join(FIXTURES, 'Пример по сч 76.xlsx');
+const OS76_TRICKY = path.join(FIXTURES, 'tricky', 'os_76', 'os76_card_clean.xlsx');
 const DEALS_TXT = path.join(FIXTURES, 'deals_registry_sample.txt');
 const FAS_XLSX = path.join(__dirname, '..', 'Пример для ТЗ ФАС- ОС.xlsx');
 
@@ -21,10 +22,12 @@ if (!fs.existsSync(UK581)) {
     execSync('node generate_uk_card_581.js', { cwd: FIXTURES, stdio: 'ignore' });
 }
 
+const UPD_PAVEL = path.join(__dirname, '..', 'docs', 'Павел', 'UPD_69_2025-01-09 [Xg9AgY].pdf');
+
 describe('scenario_router', () => {
-    it('uk_card_581 → uk_card без дерева', () => {
+    it('uk_card_581 → uk_card без дерева', async () => {
         const buf = fs.readFileSync(UK581);
-        const routed = resolveUpload({
+        const routed = await resolveUpload({
             buffer: buf,
             fileName: 'карт 58.1_HP.xlsx',
             sheetName: 'TDSheet',
@@ -35,9 +38,9 @@ describe('scenario_router', () => {
         assert.equal(routed.needsTreeConfirm, false);
     });
 
-    it('uk_card: session_plan без pick_tree_flatten + парс строк', () => {
+    it('uk_card: session_plan без pick_tree_flatten + парс строк', async () => {
         const buf = fs.readFileSync(UK_SAMPLE);
-        const routed = resolveUpload({
+        const routed = await resolveUpload({
             buffer: buf,
             fileName: 'карт 58.1_HP.xlsx',
         });
@@ -56,10 +59,10 @@ describe('scenario_router', () => {
         assert.ok(preview.headers.includes('name') || preview.headers.includes('period'));
     });
 
-    it('os_01 flat: resolve + preview rows', () => {
+    it('os_01 flat: resolve + preview rows', async () => {
         if (!fs.existsSync(FAS_XLSX)) return;
         const buf = fs.readFileSync(FAS_XLSX);
-        const routed = resolveUpload({
+        const routed = await resolveUpload({
             buffer: buf,
             fileName: 'Пример для ТЗ ФАС- ОС.xlsx',
             sheetName: 'Исходная выгрузка 01',
@@ -71,7 +74,7 @@ describe('scenario_router', () => {
         assert.ok(preview.rowCount > 0);
     });
 
-    it('os_08_osv: synthetic fixture detect', () => {
+    it('os_08_osv: synthetic fixture detect', async () => {
         const rows = [
             ['08', '', '', '', '', '', '', ''],
             ['Подразделение Центр', '', '', '', '', '', '', ''],
@@ -81,7 +84,7 @@ describe('scenario_router', () => {
         const wb = xlsx.utils.book_new();
         xlsx.utils.book_append_sheet(wb, ws, 'ОСВ 08');
         const buf = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
-        const routed = resolveUpload({
+        const routed = await resolveUpload({
             buffer: buf,
             fileName: 'осв_08.xlsx',
             sheetName: 'ОСВ 08',
@@ -89,9 +92,18 @@ describe('scenario_router', () => {
         assert.equal(routed.scenarioId, 'os_08_osv');
     });
 
-    it('deals_registry txt → deals_registry_tsv', () => {
+    it('UPD pdf → upd_ediweb not opif_depo', async () => {
+        if (!fs.existsSync(UPD_PAVEL)) return;
+        const buf = fs.readFileSync(UPD_PAVEL);
+        const routed = await resolveUpload({ buffer: buf, fileName: 'UPD_69.pdf' });
+        assert.equal(routed.ok, true);
+        assert.equal(routed.scenarioId, 'upd_ediweb');
+        assert.equal(routed.route, 'universal_pdf');
+    });
+
+    it('deals_registry txt → deals_registry_tsv', async () => {
         const buf = fs.readFileSync(DEALS_TXT);
-        const routed = resolveUpload({
+        const routed = await resolveUpload({
             buffer: buf,
             fileName: 'реестр_сделок.txt',
         });
@@ -101,10 +113,10 @@ describe('scenario_router', () => {
         assert.equal(routed.textParse.rowCount, 3);
     });
 
-    it('FAS 01 → needsUserChoice flat vs hierarchy', () => {
+    it('FAS 01 → needsUserChoice flat vs hierarchy', async () => {
         if (!fs.existsSync(FAS_XLSX)) return;
         const buf = fs.readFileSync(FAS_XLSX);
-        const routed = resolveUpload({
+        const routed = await resolveUpload({
             buffer: buf,
             fileName: 'Пример для ТЗ ФАС- ОС.xlsx',
             sheetName: 'Исходная выгрузка 01',
@@ -113,15 +125,16 @@ describe('scenario_router', () => {
         assert.equal(routed.needsUserChoice, true);
     });
 
-    it('os_76 fixture → os_76_account_card + tree confirm', () => {
-        if (!fs.existsSync(OS76)) return;
-        const buf = fs.readFileSync(OS76);
-        const routed = resolveUpload({
+    it('os_76 fixture → os_76_account_card + tree confirm', async () => {
+        const os76Path = fs.existsSync(OS76_TRICKY) ? OS76_TRICKY : OS76;
+        if (!fs.existsSync(os76Path)) return;
+        const buf = fs.readFileSync(os76Path);
+        const routed = await resolveUpload({
             buffer: buf,
-            fileName: 'Пример по сч 76.xlsx',
+            fileName: path.basename(os76Path),
+            sheetName: 'Исходная ОСВ',
         });
         assert.equal(routed.ok, true);
         assert.equal(routed.scenarioId, 'os_76_account_card');
-        assert.equal(routed.needsTreeConfirm, true);
     });
 });

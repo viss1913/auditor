@@ -1,4 +1,5 @@
 const { detectSuggestedScenario } = require('./scenarios/registry');
+const { isSmartDialogEnabled } = require('./martin_flags');
 
 function scenarioFromTreeProfile(profileKey) {
     return (
@@ -29,17 +30,24 @@ function shouldAutoFlattenTree(layoutMeta) {
 function applyAutostartDefaults(layoutMeta, answers = {}) {
     const out = { ...answers };
     const treeInf = layoutMeta?.tree_inference;
+    const smartDialog = isSmartDialogEnabled();
 
-    if (!out.pick_tree_flatten && shouldAutoFlattenTree(layoutMeta)) {
-        out.pick_tree_flatten = 'confirm';
-    }
-    if (out.pick_tree_flatten === 'confirm' && treeInf?.profileKey) {
+    if (!smartDialog) {
+        if (!out.pick_tree_flatten && shouldAutoFlattenTree(layoutMeta)) {
+            out.pick_tree_flatten = 'confirm';
+        }
+        if (out.pick_tree_flatten === 'confirm' && treeInf?.profileKey) {
+            out.scenarioId = out.scenarioId || scenarioFromTreeProfile(treeInf.profileKey);
+        }
+    } else if (out.pick_tree_flatten === 'confirm' && treeInf?.profileKey) {
         out.scenarioId = out.scenarioId || scenarioFromTreeProfile(treeInf.profileKey);
     }
 
     if (!out.scenarioId) {
         const detected = detectSuggestedScenario(layoutMeta, null);
-        if (detected.scenarioId) out.scenarioId = detected.scenarioId;
+        if (detected.scenarioId && !(smartDialog && detected.needsUserChoice)) {
+            out.scenarioId = detected.scenarioId;
+        }
     }
 
     if (!out.sheetName && layoutMeta?.sheetName) {

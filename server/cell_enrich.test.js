@@ -5,9 +5,11 @@ const {
     extractDate,
     extractAddress,
     extractInventoryNumber,
+    extractCounterpartyNumber,
     applyExtractFields,
     stripExtractedFromText,
     defaultExtractFields,
+    defaultCounterpartyNumberFields,
     sanitizeClassification,
     classifyBatchUnique,
 } = require('./cell_enrich');
@@ -56,6 +58,27 @@ describe('cell_enrich extract', () => {
         assert.ok(/машиномест/i.test(cleaned));
     });
 
+    it('stripExtractedFromText: только инвентарный номер, дата остаётся', () => {
+        const t = 'ППА аренда машиномест, 80-560482, 31.12.2021';
+        const cleaned = stripExtractedFromText(t, { inventory: true, date: false });
+        assert.ok(!/80-560482/.test(cleaned));
+        assert.ok(/31\.12\.2021/.test(cleaned));
+    });
+
+    it('extractCounterpartyNumber: Контрагент10 и Контрагент 10', () => {
+        assert.equal(extractCounterpartyNumber('Контрагент10'), '10');
+        assert.equal(extractCounterpartyNumber('Контрагент 10'), '10');
+        assert.equal(extractCounterpartyNumber(''), null);
+        assert.equal(extractCounterpartyNumber('Итого'), null);
+        const vals = applyExtractFields('Контрагент10', defaultCounterpartyNumberFields());
+        assert.equal(vals.contragent_number, '10');
+    });
+
+    it('applyExtractFields: пустая ячейка не создаёт ключ', () => {
+        const vals = applyExtractFields('', defaultCounterpartyNumberFields());
+        assert.deepEqual(vals, {});
+    });
+
     it('multiline: 80-560482 и очистка', () => {
         const t = 'ППА аренда\nмашиномест,\n80-560482,\n31.12.2021';
         assert.equal(extractInventoryNumber(t), '80-560482');
@@ -64,6 +87,37 @@ describe('cell_enrich extract', () => {
         const cleaned = stripExtractedFromText(t);
         assert.ok(!/80-560482/.test(cleaned));
         assert.ok(!/31\.12\.2021/.test(cleaned));
+    });
+
+    it('extractDealNumber: mcxs из брокерской ячейки', () => {
+        const {
+            extractDealNumber,
+            dealNumberFields,
+            inferExtractFieldsFromMessage,
+            parseTargetColumnFromMessage,
+        } = require('./cell_enrich');
+        const t =
+            'ПАО Московская Биржа, Фондовый рынок mcxs1504876654521 01.10.25 10:15:00';
+        assert.equal(extractDealNumber(t), 'mcxs1504876654521');
+        const vals = applyExtractFields(t, dealNumberFields('Номер сделки'));
+        assert.equal(vals['Номер сделки'], 'mcxs1504876654521');
+        const fields = inferExtractFieldsFromMessage('вынеси номер сделки назови колонку Номер сделки');
+        assert.ok(fields.some((f) => f.field === 'deal_number'));
+        assert.equal(parseTargetColumnFromMessage('назови колонку Номер сделки'), 'Номер сделки');
+    });
+
+    it('extractDate: dd.mm.yy для брокерских отчётов', () => {
+        assert.equal(extractDate('mcxs123 01.10.25 10:15'), '01.10.25');
+    });
+
+    it('stripExtractedFromText: убирает mcxs и дату', () => {
+        const { extractDealNumber, stripExtractedFromText: strip } = require('./cell_enrich');
+        const t = 'ПАО Московская Биржа mcxs1504876654521 01.10.25';
+        assert.equal(extractDealNumber(t), 'mcxs1504876654521');
+        const cleaned = strip(t, { deal_number: true, date: true, inventory: false });
+        assert.ok(!/mcxs1504876654521/i.test(cleaned));
+        assert.ok(!/01\.10\.25/.test(cleaned));
+        assert.ok(/московская/i.test(cleaned));
     });
 });
 

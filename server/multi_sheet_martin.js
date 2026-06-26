@@ -1,9 +1,11 @@
 const { detectSourceKind } = require('./file_dispatch');
 const { listSheetNames } = require('./excel_preview');
+const { isMetaSheetName } = require('./excel_sheet_meta');
 const { loadTargetRows } = require('./compare_target');
 const {
     orchestrateSheetParse,
     isInstructionSheet,
+    isReferenceSheet,
     isPlausibleParse,
     scenarioCandidatesForLayout,
 } = require('./sheet_parse_orchestrator');
@@ -15,7 +17,19 @@ function buildMultiSheetAssistantMessage(fileName, parsed, skipped) {
     }
     if (skipped.length) {
         lines.push('');
-        lines.push(`Пропустила ${skipped.length} лист(а): ${skipped.map((s) => `«${s.sheetName}» (${s.reason})`).join('; ')}`);
+        const refused = skipped.filter((s) => s.refused);
+        const other = skipped.filter((s) => !s.refused);
+        if (refused.length) {
+            lines.push(`Не разобрала ${refused.length} лист(а) — формат неизвестен или неуверен:`);
+            for (const s of refused) {
+                lines.push(s.assistantMessage || `«${s.sheetName}»: ${s.reason}`);
+            }
+        }
+        if (other.length) {
+            lines.push(
+                `Пропустила ${other.length} лист(а): ${other.map((s) => `«${s.sheetName}» (${s.reason})`).join('; ')}`
+            );
+        }
     }
     lines.push('');
     lines.push('Переключай вкладки сверху — команды в чате идут в **активную** таблицу. Лишние вкладки можно убрать крестиком ×.');
@@ -40,16 +54,30 @@ function wantsSingleSheetOnly(orchestratorAnswers, sheetName) {
     return false;
 }
 
+/** Авто multi-sheet на гигантских xlsx — десятки минут; только по явной фразе «все листы». */
+const MULTI_SHEET_MAX_BYTES = 6 * 1024 * 1024;
+
 function shouldParseAllSheets({ files, scenarioId, parseAllSheets, orchestratorAnswers, sheetName }) {
     if (parseAllSheets === '0' || parseAllSheets === false) return false;
     if (scenarioId && /opif_|deals_|card_90/.test(scenarioId)) return false;
     const explicit = isExplicitParseAllSheets(parseAllSheets);
-    if (!explicit && wantsSingleSheetOnly(orchestratorAnswers, sheetName)) return false;
     if (!files?.length || files.length !== 1) return false;
+    const fileBytes = files[0].buffer?.length || 0;
+    if (!explicit && fileBytes > MULTI_SHEET_MAX_BYTES) return false;
     const name = files[0].originalname || files[0].name || '';
     if (detectSourceKind(name) !== 'excel') return false;
-    const { sheetNames } = listSheetNames(files[0].buffer);
+    const { sheetNames, defaultSheet } = listSheetNames(files[0].buffer);
     if (explicit) return sheetNames.length >= 1;
+    // defaultSheet в body ≠ явный выбор одного листа
+    if (
+        sheetNames.length > 1 &&
+        sheetName &&
+        sheetName === defaultSheet &&
+        !orchestratorAnswers?.sheetName
+    ) {
+        return true;
+    }
+    if (!explicit && wantsSingleSheetOnly(orchestratorAnswers, sheetName)) return false;
     return sheetNames.length > 1;
 }
 
@@ -57,7 +85,33 @@ async function parseOneExcelSheet(opts) {
     return orchestrateSheetParse(opts);
 }
 
-async function parseAllExcelSheets({ pool, file, targetFile, projectId, savedRules = [] }) {
+function wantsMultiSheetExcelParse({
+    files,
+    sheetNames = [],
+    scenarioId,
+    parseAllSheets,
+    orchestratorAnswers,
+    sheetName,
+    parsePlan,
+}) {
+    return (
+        parsePlan?.parseAllSheets ||
+        shouldParseAllSheets({
+            files,
+            scenarioId,
+            parseAllSheets,
+            orchestratorAnswers,
+            sheetName,
+        }) ||
+        (sheetNames.length > 1 &&
+            !sheetName &&
+            !orchestratorAnswers?.sheetName &&
+            !String(orchestratorAnswers?.pick_tree_flatten || '').startsWith('scenario:') &&
+            !scenarioId)
+    );
+}
+
+async function parseAllExcelSheets({ pool, file, targetFile, projectId, savedRules = [], userMessage = '' }) {
     const { sheetNames } = listSheetNames(file.buffer);
     const target = targetFile?.buffer ? loadTargetRows(targetFile.buffer) : null;
     const parsed = [];
@@ -65,6 +119,15 @@ async function parseAllExcelSheets({ pool, file, targetFile, projectId, savedRul
     const allWarnings = [];
 
     for (const sheetName of sheetNames) {
+        if (isMetaSheetName(sheetName)) {
+            skipped.push({
+                ok: false,
+                sheetName,
+                skipped: true,
+                reason: 'служебный лист (мэппинг/выводы)',
+            });
+            continue;
+        }
         try {
             const result = await orchestrateSheetParse({
                 pool,
@@ -73,6 +136,7 @@ async function parseAllExcelSheets({ pool, file, targetFile, projectId, savedRul
                 projectId,
                 savedRules,
                 target,
+                userMessage,
             });
             if (result.ok) {
                 parsed.push(result);
@@ -106,9 +170,11 @@ module.exports = {
     isExplicitParseAllSheets,
     wantsSingleSheetOnly,
     shouldParseAllSheets,
+    wantsMultiSheetExcelParse,
     parseAllExcelSheets,
     parseOneExcelSheet,
     isInstructionSheet,
+    isReferenceSheet,
     isPlausibleParse,
     scenarioCandidatesForLayout,
     buildMultiSheetAssistantMessage,

@@ -5,6 +5,7 @@ function detectSourceKind(fileName) {
     if (['.txt', '.csv', '.tsv'].includes(ext)) return 'text_1c';
     if (['.xlsx', '.xls', '.xlsm'].includes(ext)) return 'excel';
     if (['.pdf'].includes(ext)) return 'pdf';
+    if (['.jpg', '.jpeg', '.png', '.webp', '.gif', '.tif', '.tiff'].includes(ext)) return 'image_scan';
     return 'unknown';
 }
 

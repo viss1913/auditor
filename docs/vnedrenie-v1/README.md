@@ -9,7 +9,8 @@
 | [02-plan-rabot.md](./02-plan-rabot.md)                                 | План работ по этапам                                                                                                   |
 | [03-arhitektura.md](./03-arhitektura.md)                               | Архитектура и потоки данных (Mermaid)                                                                                  |
 | [04-trebuemye-moshchnosti.md](./04-trebuemye-moshchnosti.md)           | Требования к серверам, GPU, сети, бэкапам                                                                              |
-
+| [devops-meeting/00-paket-na-vstrechu.md](./devops-meeting/00-paket-na-vstrechu.md) | Пакет на встречу с DevOps: протокол, акт стенда, Ollama offline, deploy |
+| [devops-meeting/04-kompyuternoe-zrenie.md](./devops-meeting/04-kompyuternoe-zrenie.md) | Vision LLM: сканы PDF/фото, GPU, env |
 
 Перед отправкой клиенту: подставить реквизиты Заказчика и Исполнителя, сроки оплаты в днях, дату старта абонентской платы, форму учёта часов (акт/табель).
 

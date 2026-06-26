@@ -1,7 +1,7 @@
 {
   "rule_schema_version": 2,
   "meta": {
-    "name": "Карточка счёта УК — полная (58.01)",
+    "name": "Карточка счёта УК — все проводки",
     "source_type": "excel",
     "profile_hint": "uk_card",
     "uk_mode": "full"
@@ -17,17 +17,20 @@
     "indicator": 5,
     "debit_account": 6,
     "amount": 7,
-    "credit_account": 9
+    "credit_account": 9,
+    "balance_side": 10,
+    "balance": 11
   },
   "conditions": {
-    "debit_account_prefix": "58.01",
     "mode": "full"
   },
   "multi_row": {
     "indicator_column": 5,
     "indicator_value": "Кол.",
     "amount_column": 7,
-    "quantity_column": 7
+    "quantity_column": 7,
+    "balance_column": 11,
+    "balance_side_column": 10
   },
   "columns": [
     { "target": "period", "source": { "type": "fixed_cell", "column": 0 } },
@@ -35,8 +38,12 @@
     { "target": "operation_type", "source": { "type": "fixed_cell", "column": 1, "transform": "uk_operation_type" } },
     { "target": "name", "source": { "type": "fixed_cell", "column": 3, "transform": "analytics_name" } },
     { "target": "regNum", "source": { "type": "fixed_cell", "column": 3, "transform": "analytics_reg" } },
+    { "target": "Аналитика Дт", "source": { "type": "fixed_cell", "column": 3 } },
+    { "target": "Аналитика Кт", "source": { "type": "fixed_cell", "column": 4 } },
     { "target": "amount", "source": { "type": "fixed_cell", "column": 7 } },
     { "target": "quantity", "source": { "type": "fixed_cell", "column": 7, "transform": "quantity_row" } },
+    { "target": "current_balance_bu", "source": { "type": "fixed_cell", "column": 11 } },
+    { "target": "current_balance_qty", "source": { "type": "fixed_cell", "column": 11, "transform": "quantity_row" } },
     { "target": "debit_account", "source": { "type": "fixed_cell", "column": 6 } },
     { "target": "credit_account", "source": { "type": "fixed_cell", "column": 9 } }
   ],

@@ -4,7 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test smart_parse_uk.test.js smart_parse_os.test.js smart_parse_uk.e2e.test.js",
+    "test": "node --test smart_parse_uk.test.js smart_parse_os.test.js smart_parse_uk.e2e.test.js fixtures_matrix.test.js scenario_router.test.js martin_dialog.test.js martin_tools.test.js llm_client.test.js",
+    "test:all": "node --test \"**/*.test.js\"",
+    "test:fixtures": "node --test fixtures_matrix.test.js scenario_router.test.js martin_dialog.test.js",
+    "test:db": "node --test parse_snapshot_store.test.js multi_sheet_martin.test.js",
+    "fixtures:generate": "node fixtures/generators/generate_all.js",
     "parse:os-demo": "node scripts/parse_os_demo.js"
   },
   "keywords": [],
@@ -17,6 +21,7 @@
     "express": "^5.2.1",
     "multer": "^2.1.0",
     "pdf-parse": "^1.1.4",
+    "pdfjs-dist": "^4.10.38",
     "pg": "^8.19.0",
     "xlsx": "^0.18.5"
   }

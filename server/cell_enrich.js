@@ -12,9 +12,50 @@ const ALLOWED_CLASSES = new Set([
 
 function extractDate(text) {
     const t = String(text || '');
-    const m = t.match(/\b(\d{2})\.(\d{2})\.(\d{4})\b/);
-    if (!m) return null;
-    return m[0];
+    const full = t.match(/\b(\d{2}\.\d{2}\.\d{4})\b/);
+    if (full) return full[1];
+    const short = t.match(/\b(\d{2}\.\d{2}\.\d{2})\b/);
+    if (short) return short[1];
+    return null;
+}
+
+function extractDealNumber(text) {
+    const m = String(text || '').match(/mcxs\d+/i);
+    return m ? m[0] : null;
+}
+
+function sanitizeTargetColumnName(name) {
+    const raw = String(name || '').trim().replace(/^["«']|["»']$/g, '');
+    if (!raw) return '';
+    if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(raw)) return raw.slice(0, 48);
+    return raw.replace(/\s+/g, ' ').trim().slice(0, 64);
+}
+
+function parseTargetColumnFromMessage(message) {
+    const t = String(message || '');
+    const patterns = [
+        /(?:назови|назвать)\s+колонк[ауиё]?\s+["«']?([^"»'\n,.]+)/i,
+        /колонк[ауиё]?\s+(?:назови|назови)\s+["«']?([^"»'\n,.]+)/i,
+        /новую\s+колонк[ауиё]?\s+["«']?([^"»'\n,.]+)/i,
+        /в\s+колонк[ауиё]?\s+["«']?([^"»'\n,.]+?)["»']?(?:\s*$|[,.])/i,
+    ];
+    for (const re of patterns) {
+        const m = t.match(re);
+        if (m?.[1]) {
+            const col = sanitizeTargetColumnName(m[1].trim());
+            if (col) return col;
+        }
+    }
+    return null;
+}
+
+function extractCounterpartyNumber(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return null;
+    const labeled = raw.match(/(?:контрагент|counterparty)\s*(\d+)/i);
+    if (labeled?.[1]) return labeled[1];
+    const trailing = raw.match(/(\d+)\s*$/);
+    return trailing?.[1] || null;
 }
 
 function extractInventoryNumber(text) {
@@ -46,12 +87,16 @@ function normalizeCellText(t) {
         .trim();
 }
 
-/** Убрать из исходной ячейки инв. номер и дату (детерминированно, без опоры на кривой LLM-regex) */
-function stripExtractedFromText(text) {
+/** Убрать из исходной ячейки инв. номер и/или дату (детерминированно, без LLM-regex) */
+function stripExtractedFromText(text, stripTargets = { inventory: true, date: true }) {
     let t = String(text || '').replace(/\r\n/g, '\n');
+    const stripInventory = stripTargets?.inventory !== false;
+    const stripDate = stripTargets?.date !== false;
+    const stripDeal = stripTargets?.deal_number !== false;
 
-    const inv = extractInventoryNumber(t);
-    const date = extractDate(t);
+    const inv = stripInventory ? extractInventoryNumber(t) : null;
+    const date = stripDate ? extractDate(t) : null;
+    const deal = stripDeal ? extractDealNumber(t) : null;
 
     if (inv) {
         t = t.replace(new RegExp(escapeRegex(inv), 'gi'), '');
@@ -59,20 +104,126 @@ function stripExtractedFromText(text) {
     if (date) {
         t = t.replace(new RegExp(escapeRegex(date), 'gi'), '');
     }
+    if (deal) {
+        t = t.replace(new RegExp(escapeRegex(deal), 'gi'), '');
+    }
 
-    t = t.replace(/80-\d+/gi, '');
-    t = t.replace(/\b\d{2}\.\d{2}\.\d{4}\b/g, '');
-
-    const withoutDate = t.replace(/\b\d{2}\.\d{2}\.\d{4}\b/g, ' ');
-    const nums = [...withoutDate.matchAll(/\b\d{6,}\b/g)];
-    if (nums.length) {
-        const last = nums[nums.length - 1][0];
-        if (!inv || last !== inv.replace(/^80-/, '')) {
-            t = t.replace(new RegExp(`\\b${escapeRegex(last)}\\b`), '');
+    if (stripInventory) {
+        t = t.replace(/80-\d+/gi, '');
+        const withoutDate = t.replace(/\b\d{2}\.\d{2}\.\d{4}\b/g, ' ');
+        const nums = [...withoutDate.matchAll(/\b\d{6,}\b/g)];
+        if (nums.length) {
+            const last = nums[nums.length - 1][0];
+            if (!inv || last !== inv.replace(/^80-/, '')) {
+                t = t.replace(new RegExp(`\\b${escapeRegex(last)}\\b`), '');
+            }
         }
     }
 
+    if (stripDate) {
+        t = t.replace(/\b\d{2}\.\d{2}\.(?:\d{4}|\d{2})\b/g, '');
+    }
+
     return normalizeCellText(t);
+}
+
+function inferStripTargets(message) {
+    const t = String(message || '')
+        .toLowerCase()
+        .replace(/ё/g, 'е');
+    const wantsInv =
+        /инвентар|inventory/.test(t) ||
+        (/номер/.test(t) && !/контрагент|counterparty/.test(t));
+    const wantsDate = /дат|date/.test(t);
+    if (wantsInv && wantsDate) return { inventory: true, date: true };
+    if (wantsInv && !wantsDate) return { inventory: true, date: false };
+    if (wantsDate && !wantsInv) return { inventory: false, date: true };
+    return { inventory: true, date: true };
+}
+
+function inventoryOnlyFields() {
+    return [
+        {
+            target_column: 'inventory_extracted',
+            pattern: '(80-\\d+)',
+            field: 'inventory',
+            description: 'инвентарный номер',
+        },
+    ];
+}
+
+function dateOnlyFields(targetColumn = 'date_extracted') {
+    return [
+        {
+            target_column: targetColumn,
+            pattern: '\\b\\d{2}\\.\\d{2}\\.(?:\\d{4}|\\d{2})\\b',
+            field: 'date',
+            description: 'дата',
+        },
+    ];
+}
+
+function dealNumberFields(targetColumn = 'deal_number') {
+    return [
+        {
+            target_column: targetColumn,
+            pattern: '(mcxs\\d+)',
+            field: 'deal_number',
+            description: 'номер сделки',
+        },
+    ];
+}
+
+function inferExtractFieldsFromMessage(message) {
+    const t = String(message || '')
+        .toLowerCase()
+        .replace(/ё/g, 'е');
+    const customName = parseTargetColumnFromMessage(message);
+    const wantsDeal = /сделк|mcxs|номер\s+сделки/.test(t);
+    const wantsDate = /дат|date/.test(t);
+    const wantsInv =
+        /инвентар|inventory/.test(t) ||
+        (/номер/.test(t) && !wantsDeal && !/контрагент|counterparty/.test(t));
+    const wantsAddr = /адрес/.test(t);
+
+    const fields = [];
+    if (wantsDeal) {
+        fields.push(...dealNumberFields(customName && wantsDeal && !wantsDate ? customName : 'deal_number'));
+    }
+    if (wantsDate) {
+        const dateCol =
+            customName && wantsDate && !wantsDeal && !wantsInv
+                ? customName
+                : customName && wantsDeal
+                  ? `${customName}_date`
+                  : 'date_extracted';
+        fields.push(...dateOnlyFields(dateCol));
+    }
+    if (wantsInv) fields.push(...inventoryOnlyFields());
+    if (wantsAddr) {
+        fields.push({
+            target_column: customName || 'address_extracted',
+            pattern: 'по\\s+адресу[^,]+',
+            field: 'address',
+            description: 'адрес',
+        });
+    }
+
+    if (fields.length) return fields;
+
+    const targets = inferStripTargets(message);
+    const fallback = [];
+    if (targets.inventory) fallback.push(...inventoryOnlyFields());
+    if (targets.date) fallback.push(...dateOnlyFields());
+    return fallback.length ? fallback : defaultExtractFields();
+}
+
+function stripTargetsFromFields(fields = []) {
+    return {
+        inventory: fields.some((f) => f.field === 'inventory'),
+        date: fields.some((f) => f.field === 'date'),
+        deal_number: fields.some((f) => f.field === 'deal_number'),
+    };
 }
 
 function extractWithPattern(text, pattern) {
@@ -106,12 +257,31 @@ function applyExtractFields(text, extractFields = []) {
         } else if (f.field === 'address') {
             v = extractAddress(text);
             if (!v) v = extractWithPattern(text, f.pattern);
+        } else if (f.field === 'counterparty_number') {
+            v = extractCounterpartyNumber(text);
+            if (!v) v = extractWithPattern(text, f.pattern);
+        } else if (f.field === 'deal_number') {
+            v = extractDealNumber(text);
+            if (!v) v = extractWithPattern(text, f.pattern);
         } else {
             v = extractWithPattern(text, f.pattern);
         }
-        values[col] = v;
+        if (v != null && String(v).trim() !== '') {
+            values[col] = v;
+        }
     }
     return values;
+}
+
+function defaultCounterpartyNumberFields(targetColumn = 'contragent_number') {
+    return [
+        {
+            target_column: targetColumn,
+            pattern: '(?:контрагент|counterparty)\\s*(\\d+)',
+            field: 'counterparty_number',
+            description: 'номер контрагента',
+        },
+    ];
 }
 
 function defaultExtractFields() {
@@ -254,12 +424,25 @@ async function classifyBatchUnique(values, options = {}) {
 
 module.exports = {
     extractDate,
+    extractDealNumber,
     extractAddress,
     extractInventoryNumber,
+    extractCounterpartyNumber,
+    defaultCounterpartyNumberFields,
+    dealNumberFields,
+    parseTargetColumnFromMessage,
+    sanitizeTargetColumnName,
     extractWithPattern,
     applyExtractFields,
     stripExtractedFromText,
+    normalizeCellText,
+    escapeRegex,
     defaultExtractFields,
+    inventoryOnlyFields,
+    dateOnlyFields,
+    inferExtractFieldsFromMessage,
+    inferStripTargets,
+    stripTargetsFromFields,
     sanitizeClassification,
     classifyAssetCell,
     classifyBatchUnique,

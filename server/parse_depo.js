@@ -9,9 +9,18 @@ function extractAccountFromFilename(fileName) {
     return fallbackMatch ? fallbackMatch[1].trim() : '';
 }
 
+function extractDepoAccountFromLines(lines) {
+    for (const line of lines) {
+        const m = String(line || '').match(/^Счет\/счет\s+ДЕПО:\s*([^\s]+)/i);
+        if (m) return m[1].trim();
+    }
+    return '';
+}
+
 function parseDepoLines(lines, fileName = '', logLabel = '') {
     const results = [];
     const accountFromFilename = extractAccountFromFilename(fileName);
+    const depoAccount = extractDepoAccountFromLines(lines);
 
     if (logLabel) {
         console.log(`[DEPO PARSE] fileName: "${fileName}", account extracted: "${accountFromFilename}"`);
@@ -72,6 +81,7 @@ function parseDepoLines(lines, fileName = '', logLabel = '') {
                     fee: 0,
                     debit_account: accountFromFilename,
                     credit_account: '',
+                    depo_account: depoAccount,
                 });
             }
         }
@@ -98,4 +108,5 @@ module.exports = {
     parseDepoFromBuffer,
     parseDepoLines,
     extractAccountFromFilename,
+    extractDepoAccountFromLines,
 };

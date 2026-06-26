@@ -10,10 +10,13 @@ flowchart TD
   UI --> Lyubov[lyubov → ОПИФ УК/Брокер/ДЕПО]
   UI --> Pavel[pavel → TBD]
   UI --> Kseniya[kseniya → target/compare]
+  PDF[PDF upload / inbox] --> PdfMachine[pdf_machine → universal_parse]
   Router[parser_registry.js] --> Anton
   Router --> Lyubov
   Router --> Pavel
   Router --> Kseniya
+  PdfMachine --> Anton
+  PdfMachine --> Lyubov
 ```
 
 ## Профили
@@ -39,8 +42,11 @@ flowchart TD
 | lyubov | `.cursor/agents/lyubov.md` |
 | pavel | `.cursor/agents/pavel.md` |
 | kseniya | `.cursor/agents/kseniya.md` |
+| pdf_machine | `.cursor/agents/pdf_machine.md` |
 
-Вызов в чате: `Use the anton subagent to ...`
+Вызов в чате: `Use the anton subagent to ...` / `Use the pdf_machine subagent to ...`
+
+**pdf_machine** — Cursor-агент для разработки PDF-парсеров (probe → extract → тест). Не UI-профиль в `parser_registry.js`; результат уходит в snapshots (Martin) или `trades` (ОПИФ DEPO).
 
 ## Будущий единый dispatch
 

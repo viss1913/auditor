@@ -140,7 +140,14 @@ npm run dev
 4. Уточнения в чате → обновление правила
 5. **Сохранить правило** (нужна таблица `projects` — `node server/migrate_db.js`)
 
-Переменные: см. `.env.example` (`OPENROUTER_API_KEY`, `QWEN_MODEL`, `LLM_BASE_URL`).
+Переменные LLM (см. `docs/OPISANIE_PROEKTA.md`):
+
+```env
+GEMINI_API_KEY=...              # основной провайдер
+GEMINI_MODEL=gemini-2.0-flash
+MARTIN_SMART_DIALOG=1         # Martin спрашивает, а не глотает неоднозначности
+OPENROUTER_API_KEY=...          # fallback
+```
 
 #### Контракт JSON-правила для умного парсинга УК
 

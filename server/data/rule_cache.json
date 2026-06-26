@@ -1,0 +1,2432 @@
+{
+  "scenario:5c836316d78d4cfbb7f1ac12": {
+    "scenarioId": "uk_card",
+    "confidence": 0.95,
+    "reasoning": "test cache",
+    "savedAt": "2026-06-23T07:31:21.638Z",
+    "fingerprintHash": "5c836316d78d4cfbb7f1ac12"
+  },
+  "scenario:d750b08886d28209479bb52a": {
+    "scenarioId": "uk_card",
+    "confidence": 0.98,
+    "structureOntology": {
+      "layout_type": "fixed_columns",
+      "row_pattern": "bu_kol_pairs",
+      "has_tree": false
+    },
+    "reasoning": "Обнаружены пары строк БУ+Кол., счёт 58.01, даты в колонке A.  Соответствует признакам сценария uk_card.",
+    "fallback": null,
+    "savedAt": "2026-06-14T15:03:10.025Z",
+    "fingerprintHash": "d750b08886d28209479bb52a"
+  },
+  "scenario:5b1fdc6562f75b6832d6c00d": {
+    "scenarioId": "uk_card",
+    "confidence": 0.95,
+    "structureOntology": {
+      "layout_type": "fixed_columns",
+      "row_pattern": "bu_kol_pairs",
+      "has_tree": true
+    },
+    "reasoning": "Обнаружены пары строк БУ+Кол., счёт 58.01, даты в колонке A, есть сальдо БУ/Кол.  Соответствует признакам сценария uk_card.",
+    "fallback": null,
+    "savedAt": "2026-06-14T15:49:30.605Z",
+    "fingerprintHash": "5b1fdc6562f75b6832d6c00d"
+  },
+  "scenario:322f8299fcdb8f934f416c60": {
+    "scenarioId": "osv_flat_processed",
+    "confidence": 0.95,
+    "structureOntology": {
+      "layout_type": "fixed_columns",
+      "row_pattern": "flat_dimensions",
+      "has_tree": false
+    },
+    "reasoning": "Данные представляют собой плоскую таблицу (flat_dimensions) с разнесенными измерениями (Счет, Подразделение, Контрагент, Договор) и стандартными колонками ОСВ (Дебет/Кредит). Соответствует suggested_scenario и признакам плоской обработанной ОСВ.",
+    "fallback": null,
+    "savedAt": "2026-06-15T07:16:33.428Z",
+    "fingerprintHash": "322f8299fcdb8f934f416c60"
+  },
+  "scenario:5fe96256f0a4d23aac162ea0": {
+    "scenarioId": "ks_card_composite_raw",
+    "confidence": 0.9,
+    "structureOntology": {
+      "layout_type": "hierarchy_rows",
+      "row_pattern": "journal_dt_kt",
+      "has_tree": true
+    },
+    "reasoning": "Обнаружен row_pattern=journal_dt_kt, has_tree=true, нет признаков uk_card (отсутствуют пары БУ/Кол. со счетом 58).",
+    "fallback": null,
+    "savedAt": "2026-06-15T07:16:42.870Z",
+    "fingerprintHash": "5fe96256f0a4d23aac162ea0"
+  },
+  "scenario:89abe27400082c5817ab918a": {
+    "scenarioId": "os_76_account_card",
+    "confidence": 0.95,
+    "structureOntology": {
+      "layout_type": "hierarchy_osv",
+      "row_pattern": "hierarchy_labels",
+      "has_tree": true
+    },
+    "reasoning": "Структура данных соответствует иерархическому виду ОСВ со счетом 76, договорами и контрагентами. Признаки соответствуют описанию сценария os_76_account_card.",
+    "fallback": null,
+    "savedAt": "2026-06-15T07:16:37.356Z",
+    "fingerprintHash": "89abe27400082c5817ab918a"
+  },
+  "scenario:9c40ac26eef0f9c2e6ad6345": {
+    "scenarioId": "ks_card_composite_raw",
+    "confidence": 0.95,
+    "structureOntology": {
+      "layout_type": "fixed_columns",
+      "row_pattern": "journal_dt_kt",
+      "has_tree": false
+    },
+    "reasoning": "Признаки указывают на журнал 1С с периодом и дебет/кредит, без пар БУ/Кол. Это соответствует описанию сценария ks_card_composite_raw.",
+    "fallback": null,
+    "savedAt": "2026-06-15T07:16:39.883Z",
+    "fingerprintHash": "9c40ac26eef0f9c2e6ad6345"
+  },
+  "scenario:092d21aa710620ffc074a74a": {
+    "scenarioId": "uk_card",
+    "confidence": 0.98,
+    "structureOntology": {
+      "layout_type": "fixed_columns",
+      "row_pattern": "bu_kol_pairs",
+      "has_tree": true
+    },
+    "reasoning": "Обнаружены пары строк БУ+Кол., счёт 58.01, есть сальдо БУ/Кол. и дерево.",
+    "fallback": null,
+    "savedAt": "2026-06-15T08:23:50.854Z",
+    "fingerprintHash": "092d21aa710620ffc074a74a"
+  },
+  "scenario:a879a8d7ab10f908dc9f4965": {
+    "scenarioId": "uk_card",
+    "confidence": 0.95,
+    "structureOntology": {
+      "layout_type": "fixed_columns",
+      "row_pattern": "bu_kol_pairs",
+      "has_tree": false
+    },
+    "reasoning": "Признаки соответствуют сценарию uk_card: пары строк БУ+Кол., счёт 58.01, даты в колонке A, наличие баланса.",
+    "fallback": null,
+    "savedAt": "2026-06-15T09:11:49.161Z",
+    "fingerprintHash": "a879a8d7ab10f908dc9f4965"
+  },
+  "scenario:5a394b1a9c8d6350eef3426d": {
+    "scenarioId": "revenue_osv_90",
+    "confidence": 0.95,
+    "structureOntology": {
+      "layout_type": "fixed_columns",
+      "row_pattern": "flat_dimensions",
+      "has_tree": false
+    },
+    "reasoning": "Обнаружен счет 90.01 в col A, наличие блока периодов (periodBandRow=3) и явное указание в классификаторе и названии файла ('Выручка.xlsx', 'Оборотно-сальдовая ведомость по счету 90.01').",
+    "fallback": null,
+    "savedAt": "2026-06-15T07:50:38.316Z",
+    "fingerprintHash": "5a394b1a9c8d6350eef3426d"
+  },
+  "scenario:c956e66f7fe5667920fbab17": {
+    "scenarioId": "ks_card_composite_raw",
+    "confidence": 0.95,
+    "structureOntology": {
+      "layout_type": "fixed_columns",
+      "row_pattern": "journal_dt_kt",
+      "has_tree": false
+    },
+    "reasoning": "Признаки указывают на журнал 1С (dt/kt колонки, даты в col A) без пар БУ/Кол. и счёта 58.01. classifier_ranked[0] = journal_1c.",
+    "fallback": null,
+    "savedAt": "2026-06-15T07:50:39.624Z",
+    "fingerprintHash": "c956e66f7fe5667920fbab17"
+  },
+  "scenario:58658ab1e1abb463a2ad2dc1": {
+    "scenarioId": "os_01_hierarchy",
+    "confidence": 0.95,
+    "structureOntology": {
+      "layout_type": "hierarchy_rows",
+      "row_pattern": "flat_dimensions",
+      "has_tree": true
+    },
+    "reasoning": "Имеется древовидная структура (outline_depth=3, has_tree=true), данные похожи на ведомость ОС (inventory=17), и classifier_ranked[0] указывает на hierarchy_os_01.",
+    "fallback": null,
+    "savedAt": "2026-06-15T09:37:33.305Z",
+    "fingerprintHash": "58658ab1e1abb463a2ad2dc1"
+  },
+  "scenario:4b9621717a600b9d55f605cc": {
+    "scenarioId": "os_08_osv",
+    "confidence": 0.95,
+    "structureOntology": {
+      "layout_type": "hierarchy_osv",
+      "row_pattern": "flat_dimensions",
+      "has_tree": true
+    },
+    "reasoning": "Признаки указывают на ОСВ по счету 08 (счета 08* в col A, дерево).",
+    "fallback": null,
+    "savedAt": "2026-06-15T09:38:18.006Z",
+    "fingerprintHash": "4b9621717a600b9d55f605cc"
+  },
+  "scenario:a2feca0ff3aeb04931680a91": {
+    "scenarioId": "os_08_osv",
+    "confidence": 0.95,
+    "reasoning": "bad cache",
+    "fallback": null,
+    "savedAt": "2026-06-15T12:46:37.596Z",
+    "fingerprintHash": "a2feca0ff3aeb04931680a91"
+  },
+  "scenario:62b3b65651d4ee10b5dcc0b7": {
+    "scenarioId": "os_01_hierarchy",
+    "confidence": 0.9,
+    "structureOntology": {
+      "layout_type": "hierarchy_rows",
+      "row_pattern": "flat_dimensions",
+      "has_tree": true
+    },
+    "reasoning": "Признаки указывают на иерархическую структуру ОСВ (has_tree=true, outline_depth=3) и наличие flat_dimensions. classifier_ranked[0] также подтверждает это.",
+    "fallback": null,
+    "savedAt": "2026-06-18T06:15:16.757Z",
+    "fingerprintHash": "62b3b65651d4ee10b5dcc0b7"
+  },
+  "scenario:52bd9bf39a220089c2f1af55": {
+    "scenarioId": "uk_card",
+    "confidence": 0.99,
+    "reasoning": "LLM пропущен (skipLlm)",
+    "fallback": null,
+    "savedAt": "2026-06-15T10:19:09.222Z",
+    "fingerprintHash": "52bd9bf39a220089c2f1af55"
+  },
+  "04d479881ecc673014cd371d:uk_card": {
+    "rule": {
+      "rule_schema_version": 2,
+      "meta": {
+        "name": "Карточка счёта 76 - плоская таблица",
+        "source_type": "excel",
+        "profile_hint": "osv_flat_processed",
+        "uk_mode": "full",
+        "sheet_name": "Обработанная ОСВ"
+      },
+      "layout": {
+        "layout_type": "fixed_columns",
+        "skip_rows": 3,
+        "data_start_row": 4
+      },
+      "column_map": {
+        "account": 0,
+        "subdivision": 1,
+        "contractor": 2,
+        "contract": 3,
+        "debit": 4,
+        "credit": 5,
+        "debit_turnover": 6,
+        "credit_turnover": 7,
+        "debit_balance": 8,
+        "credit_balance": 9
+      },
+      "columns": [
+        {
+          "target": "account",
+          "source": {
+            "type": "fixed_cell",
+            "column": 0
+          }
+        },
+        {
+          "target": "subdivision",
+          "source": {
+            "type": "fixed_cell",
+            "column": 1
+          }
+        },
+        {
+          "target": "contractor",
+          "source": {
+            "type": "fixed_cell",
+            "column": 2
+          }
+        },
+        {
+          "target": "contract",
+          "source": {
+            "type": "fixed_cell",
+            "column": 3
+          }
+        },
+        {
+          "target": "debit",
+          "source": {
+            "type": "fixed_cell",
+            "column": 4
+          }
+        },
+        {
+          "target": "credit",
+          "source": {
+            "type": "fixed_cell",
+            "column": 5
+          }
+        },
+        {
+          "target": "debit_turnover",
+          "source": {
+            "type": "fixed_cell",
+            "column": 6
+          }
+        },
+        {
+          "target": "credit_turnover",
+          "source": {
+            "type": "fixed_cell",
+            "column": 7
+          }
+        },
+        {
+          "target": "debit_balance",
+          "source": {
+            "type": "fixed_cell",
+            "column": 8
+          }
+        },
+        {
+          "target": "credit_balance",
+          "source": {
+            "type": "fixed_cell",
+            "column": 9
+          }
+        }
+      ],
+      "output": {
+        "shape": "long"
+      }
+    },
+    "profileHint": "uk_card",
+    "savedAt": "2026-06-15T10:20:50.952Z",
+    "fingerprintHash": "04d479881ecc673014cd371d"
+  },
+  "scenario:04d479881ecc673014cd371d": {
+    "scenarioId": "osv_flat_processed",
+    "confidence": 0.95,
+    "structureOntology": {
+      "layout_type": "fixed_columns",
+      "row_pattern": "flat_dimensions",
+      "has_tree": false
+    },
+    "reasoning": "Признаки указывают на карточку счета 76: наличие счетов 76 в col A, фиксированный формат колонок, наличие подразделений и контрагентов. [classifier: osv_flat_processed вместо os_76_account_card]",
+    "fallback": null,
+    "savedAt": "2026-06-18T06:05:57.791Z",
+    "fingerprintHash": "04d479881ecc673014cd371d"
+  },
+  "scenario:35bb41449845ad840db997f6": {
+    "scenarioId": "os_76_account_card",
+    "confidence": 0.98,
+    "reasoning": "LLM пропущен (skipLlm)",
+    "fallback": null,
+    "savedAt": "2026-06-18T06:14:22.678Z",
+    "fingerprintHash": "35bb41449845ad840db997f6"
+  },
+  "scenario:530a80f929031b073134c300": {
+    "scenarioId": "ks_card_composite_raw",
+    "confidence": 0.98,
+    "reasoning": "LLM пропущен (skipLlm)",
+    "fallback": null,
+    "savedAt": "2026-06-18T06:06:03.843Z",
+    "fingerprintHash": "530a80f929031b073134c300"
+  },
+  "scenario:26c2999500a3303e64eed8c2": {
+    "scenarioId": "ks_card_composite_raw",
+    "confidence": 0.96,
+    "reasoning": "LLM пропущен (skipLlm)",
+    "fallback": null,
+    "savedAt": "2026-06-18T06:06:07.045Z",
+    "fingerprintHash": "26c2999500a3303e64eed8c2"
+  },
+  "766005ca58a5d3a853dfe0e0:wide_metrics": {
+    "rule": {
+      "rule_schema_version": 2,
+      "meta": {
+        "name": "Ведомость ОС — годы в колонках (плоская таблица)",
+        "source_type": "excel",
+        "sheet_name": "Мэппинг ручной - пример по 01",
+        "profile_hint": "os_wide_years"
+      },
+      "layout": {
+        "layout_type": "wide_metrics",
+        "name_column": 0,
+        "data_start_row": 8
+      },
+      "hierarchy": {
+        "leaf_rules": {
+          "min_name_length": 5
+        }
+      },
+      "columns": [
+        {
+          "target": "Юрлицо",
+          "source": {
+            "type": "entity_from_header"
+          }
+        },
+        {
+          "target": "Группа",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "group"
+          }
+        },
+        {
+          "target": "Подразделение",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "subdivision"
+          }
+        },
+        {
+          "target": "ОС",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "asset_name"
+          }
+        },
+        {
+          "target": "2022 - начало",
+          "source": {
+            "type": "metric",
+            "measure": "residual_open",
+            "period_suffix": "2022 - начало"
+          }
+        },
+        {
+          "target": "2022 - амортизация",
+          "source": {
+            "type": "metric",
+            "measure": "amort_charge",
+            "period_suffix": "2022 - амортизация"
+          }
+        },
+        {
+          "target": "2022 - конец",
+          "source": {
+            "type": "metric",
+            "measure": "residual_close",
+            "period_suffix": "2022 - конец"
+          }
+        },
+        {
+          "target": "2023 - начало",
+          "source": {
+            "type": "metric",
+            "measure": "residual_open",
+            "period_suffix": "2023 - начало"
+          }
+        },
+        {
+          "target": "2023 - амортизация",
+          "source": {
+            "type": "metric",
+            "measure": "amort_charge",
+            "period_suffix": "2023 - амортизация"
+          }
+        },
+        {
+          "target": "2023 - конец",
+          "source": {
+            "type": "metric",
+            "measure": "residual_close",
+            "period_suffix": "2023 - конец"
+          }
+        },
+        {
+          "target": "2024 - начало",
+          "source": {
+            "type": "metric",
+            "measure": "residual_open",
+            "period_suffix": "2024 - начало"
+          }
+        },
+        {
+          "target": "2024 - амортизация",
+          "source": {
+            "type": "metric",
+            "measure": "amort_charge",
+            "period_suffix": "2024 - амортизация"
+          }
+        },
+        {
+          "target": "2024 - конец",
+          "source": {
+            "type": "metric",
+            "measure": "residual_close",
+            "period_suffix": "2024 - конец"
+          }
+        },
+        {
+          "target": "2025 - начало",
+          "source": {
+            "type": "metric",
+            "measure": "residual_open",
+            "period_suffix": "2025 - начало"
+          }
+        },
+        {
+          "target": "2025 - амортизация",
+          "source": {
+            "type": "metric",
+            "measure": "amort_charge",
+            "period_suffix": "2025 - амортизация"
+          }
+        },
+        {
+          "target": "2025 - конец",
+          "source": {
+            "type": "metric",
+            "measure": "residual_close",
+            "period_suffix": "2025 - конец"
+          }
+        }
+      ],
+      "filters": {
+        "skip_row_patterns": [
+          "^Итого"
+        ]
+      },
+      "output": {
+        "shape": "wide"
+      }
+    },
+    "profileHint": "wide_metrics",
+    "savedAt": "2026-06-15T10:28:13.846Z",
+    "fingerprintHash": "766005ca58a5d3a853dfe0e0"
+  },
+  "766005ca58a5d3a853dfe0e0:os_01_hierarchy": {
+    "rule": {
+      "rule_schema_version": 2,
+      "meta": {
+        "name": "Ведомость ОС — плоская таблица",
+        "source_type": "excel",
+        "sheet_name": "Мэппинг ручной - пример по 01",
+        "profile_hint": "os_01_hierarchy"
+      },
+      "layout": {
+        "layout_type": "wide_metrics"
+      },
+      "columns": [
+        {
+          "target": "Группа",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "group"
+          }
+        },
+        {
+          "target": "Узел",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "unit"
+          }
+        },
+        {
+          "target": "Подразделение",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "subdivision"
+          }
+        },
+        {
+          "target": "ОС",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "asset_name"
+          }
+        },
+        {
+          "target": "2022 - начало",
+          "source": {
+            "type": "metric",
+            "measure": "residual_open"
+          }
+        },
+        {
+          "target": "2022 - амортизация",
+          "source": {
+            "type": "metric",
+            "measure": "amort_charge"
+          }
+        },
+        {
+          "target": "2022 - конец",
+          "source": {
+            "type": "metric",
+            "measure": "residual_close"
+          }
+        },
+        {
+          "target": "2023 - начало",
+          "source": {
+            "type": "metric",
+            "measure": "residual_open"
+          }
+        },
+        {
+          "target": "2023 - амортизация",
+          "source": {
+            "type": "metric",
+            "measure": "amort_charge"
+          }
+        },
+        {
+          "target": "2023 - конец",
+          "source": {
+            "type": "metric",
+            "measure": "residual_close"
+          }
+        },
+        {
+          "target": "2024 - начало",
+          "source": {
+            "type": "metric",
+            "measure": "residual_open"
+          }
+        },
+        {
+          "target": "2024 - амортизация",
+          "source": {
+            "type": "metric",
+            "measure": "amort_charge"
+          }
+        },
+        {
+          "target": "2024 - конец",
+          "source": {
+            "type": "metric",
+            "measure": "residual_close"
+          }
+        },
+        {
+          "target": "2025 - начало",
+          "source": {
+            "type": "metric",
+            "measure": "residual_open"
+          }
+        },
+        {
+          "target": "2025 - амортизация",
+          "source": {
+            "type": "metric",
+            "measure": "amort_charge"
+          }
+        },
+        {
+          "target": "2025 - конец",
+          "source": {
+            "type": "metric",
+            "measure": "residual_close"
+          }
+        }
+      ],
+      "output": {
+        "shape": "long"
+      }
+    },
+    "profileHint": "os_01_hierarchy",
+    "savedAt": "2026-06-15T10:29:44.563Z",
+    "fingerprintHash": "766005ca58a5d3a853dfe0e0"
+  },
+  "766005ca58a5d3a853dfe0e0:os_01_flat": {
+    "rule": {
+      "rule_schema_version": 2,
+      "meta": {
+        "name": "Ведомость амортизации ОС — плоская таблица",
+        "source_type": "excel",
+        "sheet_name": "Мэппинг ручной - пример по 01",
+        "profile_hint": "os_depreciation_01"
+      },
+      "layout": {
+        "layout_type": "wide_metrics",
+        "name_column": 0,
+        "data_start_row": 8
+      },
+      "hierarchy": {
+        "leaf_rules": {
+          "min_name_length": 10,
+          "inventory_patterns": [
+            "\\d{2}\\.\\d{2}\\.\\d{4}",
+            "инв\\.?",
+            "№\\s*[\\dA-Z-]",
+            "80-\\d+",
+            "\\d{6,}"
+          ],
+          "skip_name_patterns": [
+            "^ОП\\s",
+            "^РТК\\s",
+            "^КЦ$",
+            "^Итого"
+          ]
+        },
+        "levels": [
+          {
+            "id": "group",
+            "target": "Группа",
+            "depth": 0,
+            "patterns": [
+              "^(Здания|Сооружения|Машины|Земельные|Транспорт|Офисное|Производственный|Другие виды)"
+            ]
+          },
+          {
+            "id": "unit",
+            "target": "Узел",
+            "depth": 1,
+            "patterns": [
+              "^РТК\\s",
+              "^КЦ$"
+            ]
+          },
+          {
+            "id": "branch",
+            "target": "Подразделение",
+            "depth": 2,
+            "patterns": [
+              "^ОП\\s"
+            ]
+          }
+        ]
+      },
+      "columns": [
+        {
+          "target": "Группа",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "group"
+          }
+        },
+        {
+          "target": "Подразделение",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "branch"
+          }
+        },
+        {
+          "target": "Основное средство",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "asset_name"
+          }
+        },
+        {
+          "target": "2022 - начало",
+          "source": {
+            "type": "metric",
+            "measure": "residual_open",
+            "period_suffix": "2022 - начало"
+          }
+        },
+        {
+          "target": "2022 - амортизация",
+          "source": {
+            "type": "metric",
+            "measure": "amort_charge",
+            "period_suffix": "2022 - амортизация"
+          }
+        },
+        {
+          "target": "2022 - конец",
+          "source": {
+            "type": "metric",
+            "measure": "residual_close",
+            "period_suffix": "2022 - конец"
+          }
+        },
+        {
+          "target": "2023 - начало",
+          "source": {
+            "type": "metric",
+            "measure": "residual_open",
+            "period_suffix": "2023 - начало"
+          }
+        },
+        {
+          "target": "2023 - амортизация",
+          "source": {
+            "type": "metric",
+            "measure": "amort_charge",
+            "period_suffix": "2023 - амортизация"
+          }
+        },
+        {
+          "target": "2023 - конец",
+          "source": {
+            "type": "metric",
+            "measure": "residual_close",
+            "period_suffix": "2023 - конец"
+          }
+        },
+        {
+          "target": "2024 - начало",
+          "source": {
+            "type": "metric",
+            "measure": "residual_open",
+            "period_suffix": "2024 - начало"
+          }
+        },
+        {
+          "target": "2024 - амортизация",
+          "source": {
+            "type": "metric",
+            "measure": "amort_charge",
+            "period_suffix": "2024 - амортизация"
+          }
+        },
+        {
+          "target": "2024 - конец",
+          "source": {
+            "type": "metric",
+            "measure": "residual_close",
+            "period_suffix": "2024 - конец"
+          }
+        },
+        {
+          "target": "2025 - начало",
+          "source": {
+            "type": "metric",
+            "measure": "residual_open",
+            "period_suffix": "2025 - начало"
+          }
+        },
+        {
+          "target": "2025 - амортизация",
+          "source": {
+            "type": "metric",
+            "measure": "amort_charge",
+            "period_suffix": "2025 - амортизация"
+          }
+        },
+        {
+          "target": "2025 - конец",
+          "source": {
+            "type": "metric",
+            "measure": "residual_close",
+            "period_suffix": "2025 - конец"
+          }
+        }
+      ],
+      "filters": {
+        "skip_row_patterns": [
+          "^Итого",
+          "^Группа учета",
+          "^Подразделение$",
+          "^Основное средство",
+          "^Ведомость",
+          "^Выводимые"
+        ]
+      },
+      "output": {
+        "shape": "wide"
+      }
+    },
+    "profileHint": "os_01_flat",
+    "savedAt": "2026-06-15T10:31:22.926Z",
+    "fingerprintHash": "766005ca58a5d3a853dfe0e0"
+  },
+  "scenario:766005ca58a5d3a853dfe0e0": {
+    "scenarioId": "wide_metrics",
+    "confidence": 0.95,
+    "structureOntology": {
+      "layout_type": "wide_metrics",
+      "row_pattern": "flat_dimensions",
+      "has_tree": true
+    },
+    "reasoning": "Признаки указывают на layout_type=wide_metrics: годы в шапке (2022, 2023, 2024, 2025) и наличие дерева (hierarchyLike=5, hasOutline=true).",
+    "fallback": null,
+    "savedAt": "2026-06-15T10:31:33.440Z",
+    "fingerprintHash": "766005ca58a5d3a853dfe0e0"
+  },
+  "62b3b65651d4ee10b5dcc0b7:os_01_hierarchy": {
+    "rule": {
+      "rule_schema_version": 2,
+      "meta": {
+        "name": "Ведомость ОС — плоская таблица",
+        "source_type": "excel",
+        "sheet_name": "Исходная выгрузка 01",
+        "profile_hint": "os_depreciation_01"
+      },
+      "layout": {
+        "layout_type": "hierarchy_rows",
+        "name_column": 0,
+        "data_start_row": 8
+      },
+      "hierarchy": {
+        "leaf_rules": {
+          "min_name_length": 20,
+          "inventory_patterns": [
+            "\\d{2}\\.\\d{2}\\.\\d{4}",
+            "инв\\.?",
+            "№\\s*[\\dA-Z-]",
+            "80-\\d+",
+            "\\d{6,}"
+          ],
+          "skip_name_patterns": [
+            "^ОП\\s",
+            "^РТК\\s",
+            "^КЦ$",
+            "^Итого"
+          ]
+        },
+        "levels": [
+          {
+            "id": "group",
+            "target": "Группа",
+            "patterns": [
+              "^(Здания|Сооружения|Машины|Земельные|Транспорт|Офисное|Производственный|Другие виды)"
+            ]
+          },
+          {
+            "id": "unit",
+            "target": "Узел",
+            "patterns": [
+              "^РТК\\s",
+              "^КЦ$"
+            ]
+          },
+          {
+            "id": "branch",
+            "target": "Подразделение",
+            "patterns": [
+              "^ОП\\s"
+            ]
+          }
+        ],
+        "leaf": {
+          "kind": "leaf_rules"
+        }
+      },
+      "columns": [
+        {
+          "target": "Группа",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "group"
+          }
+        },
+        {
+          "target": "Узел",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "unit"
+          }
+        },
+        {
+          "target": "Подразделение",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "subdivision"
+          }
+        },
+        {
+          "target": "ОС",
+          "source": {
+            "type": "hierarchy_field",
+            "field": "asset_name"
+          }
+        },
+        {
+          "target": "На начало периода — Стоимость",
+          "source": {
+            "type": "metric",
+            "measure": "cost_open"
+          }
+        },
+        {
+          "target": "На начало периода — Амортизация (износ)",
+          "source": {
+            "type": "metric",
+            "measure": "amort_open"
+          }
+        },
+        {
+          "target": "На начало периода — Остаточная стоимость",
+          "source": {
+            "type": "metric",
+            "measure": "residual_open"
+          }
+        },
+        {
+          "target": "За период — Увеличение стоимости",
+          "source": {
+            "type": "metric",
+            "measure": "cost_increase"
+          }
+        },
+        {
+          "target": "За период — Начисление амортизации (износа)",
+          "source": {
+            "type": "metric",
+            "measure": "amort_charge"
+          }
+        },
+        {
+          "target": "За период — Уменьшение стоимости",
+          "source": {
+            "type": "metric",
+            "measure": "cost_decrease"
+          }
+        },
+        {
+          "target": "За период — Списание амортизации (износа)",
+          "source": {
+            "type": "metric",
+            "measure": "amort_writeoff"
+          }
+        },
+        {
+          "target": "На конец периода — Стоимость",
+          "source": {
+            "type": "metric",
+            "measure": "cost_close"
+          }
+        },
+        {
+          "target": "На конец периода — Амортизация (износ)",
+          "source": {
+            "type": "metric",
+            "measure": "amort_close"
+          }
+        },
+        {
+          "target": "На конец периода — Остаточная стоимость",
+          "source": {
+            "type": "metric",
+            "measure": "residual_close"
+          }
+        }
+      ],
+      "filters": {
+        "skip_row_patterns": [
+          "^Итого",
+          "^Группа учета",
+          "^Подразделение$",
+          "^Основное средство",
+          "^Ведомость",
+          "^Выводимые"
+        ]
+      },
+      "output": {
+        "shape": "long"
+      }
+    },
+    "profileHint": "os_01_hierarchy",
+    "savedAt": "2026-06-15T10:32:04.300Z",
+    "fingerprintHash": "62b3b65651d4ee10b5dcc0b7"
+  },
+  "scenario:86eeee052aa3847e4d8f97fe": {
+    "scenarioId": "os_08_osv",
+    "confidence": 0.95,
+    "structureOntology": {
+      "layout_type": "hierarchy_rows",
+      "has_tree": true,
+      "row_pattern": "flat_dimensions"
+    },
+    "reasoning": "Признаки указывают на ОСВ по счету 08, есть дерево (has_tree=true) и счета 08* в col A.",
+    "fallback": null,
+    "savedAt": "2026-06-15T10:32:40.817Z",
+    "fingerprintHash": "86eeee052aa3847e4d8f97fe"
+  },
+  "acb4b8464aff8eb40b131c29:uk_card": {
+    "rule": {
+      "rule_schema_version": 2,
+      "meta": {
+        "name": "Выручка РД_АП",
+        "source_type": "excel",
+        "profile_hint": "revenue_period",
+        "uk_mode": "full",
+        "sheet_name": "РД_АП"
+      },
+      "layout": {
+        "layout_type": "fixed_columns",
+        "skip_rows": 7
+      },
+      "column_map": {
+        "period": 0,
+        "document": 1,
+        "analytics": 3
+      },
+      "columns": [
+        {
+          "target": "period",
+          "source": {
+            "type": "fixed_cell",
+            "column": 0
+          }
+        },
+        {
+          "target": "document",
+          "source": {
+            "type": "fixed_cell",
+            "column": 1
+          }
+        },
+        {
+          "target": "analytics",
+          "source": {
+            "type": "fixed_cell",
+            "column": 3
+          }
+        },
+        {
+          "target": "amount_2025",
+          "source": {
+            "type": "fixed_cell",
+            "column": 1
+          }
+        },
+        {
+          "target": "amount_2024",
+          "source": {
+            "type": "fixed_cell",
+            "column": 2
+          }
+        },
+        {
+          "target": "change_percent",
+          "source": {
+            "type": "fixed_cell",
+            "column": 3
+          }
+        },
+        {
+          "target": "change_amount",
+          "source": {
+            "type": "fixed_cell",
+            "column": 4
+          }
+        }
+      ],
+      "output": {
+        "shape": "long"
+      }
+    },
+    "profileHint": "uk_card",
+    "savedAt": "2026-06-15T12:23:22.995Z",
+    "fingerprintHash": "acb4b8464aff8eb40b131c29"
+  },
+  "scenario:acb4b8464aff8eb40b131c29": {
+    "scenarioId": "revenue_osv_90",
+    "confidence": 0.98,
+    "structureOntology": {
+      "layout_type": "fixed_columns",
+      "row_pattern": "flat_dimensions",
+      "has_tree": false
+    },
+    "reasoning": "Признаки указывают на ОСВ с периодами и счетом 90 (account90=2, periodBand=3). classifier_ranked[0] также подтверждает revenue_osv_90.",
+    "fallback": null,
+    "savedAt": "2026-06-15T12:23:25.719Z",
+    "fingerprintHash": "acb4b8464aff8eb40b131c29"
+  },
+  "scenario:d940b8556c26444b9f9026ad": {
+    "scenarioId": "ks_card_composite_raw",
+    "confidence": 0.95,
+    "structureOntology": {
+      "layout_type": "fixed_columns",
+      "row_pattern": "journal_dt_kt",
+      "has_tree": false
+    },
+    "reasoning": "Признаки указывают на журнал 1С (dt/kt колонки, даты в col A) и отсутствие пар БУ/Кол. со счетом 58.01. classifier_ranked[0] = journal_1c.",
+    "fallback": null,
+    "savedAt": "2026-06-15T12:23:29.580Z",
+    "fingerprintHash": "d940b8556c26444b9f9026ad"
+  },
+  "scenario:1f6e3097c8b9ac6c749ad6a5": {
+    "scenarioId": "ks_card_composite_raw",
+    "confidence": 0.98,
+    "reasoning": "LLM пропущен (skipLlm)",
+    "fallback": null,
+    "savedAt": "2026-06-23T12:58:23.358Z",
+    "fingerprintHash": "1f6e3097c8b9ac6c749ad6a5"
+  },
+  "ec93d51fe2e415ea4cc37eb4:uk_card": {
+    "rule": {
+      "rule_schema_version": 2,
+      "meta": {
+        "name": "Карточка счёта УК — полная (58.01)",
+        "source_type": "excel",
+        "profile_hint": "uk_card",
+        "uk_mode": "full",
+        "sheet_name": "TDSheet"
+      },
+      "layout": {
+        "layout_type": "fixed_columns",
+        "skip_rows": 9
+      },
+      "column_map": {
+        "period": 0,
+        "document": 1,
+        "analytics": 3,
+        "debit_account": 6,
+        "amount": 7,
+        "credit_account": 8,
+        "quantity": 7
+      },
+      "multi_row": {
+        "indicator_column": 5,
+        "indicator_value": "Кол.",
+        "amount_column": 7,
+        "quantity_column": 7
+      },
+      "columns": [
+        {
+          "target": "period",
+          "source": {
+            "type": "fixed_cell",
+            "column": 0
+          }
+        },
+        {
+          "target": "document",
+          "source": {
+            "type": "fixed_cell",
+            "column": 1
+          }
+        },
+        {
+          "target": "analytics",
+          "source": {
+            "type": "fixed_cell",
+            "column": 3
+          }
+        },
+        {
+          "target": "amount",
+          "source": {
+            "type": "fixed_cell",
+            "column": 7
+          }
+        },
+        {
+          "target": "quantity",
+          "source": {
+            "type": "fixed_cell",
+            "column": 7
+          }
+        },
+        {
+          "target": "debit_account",
+          "source": {
+            "type": "fixed_cell",
+            "column": 6
+          }
+        },
+        {
+          "target": "credit_account",
+          "source": {
+            "type": "fixed_cell",
+            "column": 8
+          }
+        }
+      ],
+      "output": {
+        "shape": "long"
+      }
+    },
+    "profileHint": "uk_card",
+    "savedAt": "2026-06-16T06:13:44.540Z",
+    "fingerprintHash": "ec93d51fe2e415ea4cc37eb4"
+  },
+  "sectionLayout:aton:assets": {
+    "headers": [
+      "Валюта",
+      "На начало — Количество",
+      "На начало — В рублях^{9}",
+      "На конец — Количество",
+      "На конец — В рублях^{9}",
+      "col_6",
+      "col_7",
+      "col_8"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      172.8852488279,
+      280.8951558029,
+      475.50500597030003,
+      565.3212441704001,
+      636.175743146,
+      713.942876168,
+      785.0854015622
+    ],
+    "dataStart": 3,
+    "headerRowCount": 3,
+    "xTol": 24,
+    "layoutVersion": 4,
+    "savedAt": "2026-06-16T10:33:11.715Z"
+  },
+  "sectionLayout:aton:encumbered": {
+    "headers": [
+      "ЦБ (эмитент / ISIN / код гос. регистрации)",
+      "На начало — Количество ЦБ",
+      "На начало — Рыночная цена одной ЦБ (в валюте цены)",
+      "На начало — Рыночная стоимость ЦБ (всего)",
+      "На начало — НКД (в валюте цены)",
+      "На начало — Валюта цены",
+      "На конец — Количество ЦБ",
+      "На конец — Рыночная цена одной ЦБ (в валюте цены)",
+      "На конец — Рыночная стоимость ЦБ (всего)",
+      "На конец — НКД (в валюте цены)",
+      "На конец — Валюта цены",
+      "Планируемая позиция по ЦБ"
+    ],
+    "columnCenters": [
+      30.456184830200012,
+      239.1313251059,
+      345.00721816127276,
+      389.9707605267201,
+      412.0911894752,
+      469.7095653051363,
+      520.2451096594999,
+      626.4352133533456,
+      671.37257149892,
+      693.4930004473999,
+      751.2553894866361,
+      793.5821809109002
+    ],
+    "dataStart": 8,
+    "headerRowCount": 8,
+    "xTol": 13,
+    "layoutVersion": 4,
+    "savedAt": "2026-06-16T10:33:28.020Z"
+  },
+  "sectionLayout:aton:reserved": {
+    "headers": [
+      "col_1",
+      "col_2",
+      "Количество ЦБ (на начало)",
+      "Количество ЦБ, доступное для торгов (на начало)",
+      "На начало Рыночная цена одной ЦБ 1 (руб.)",
+      "Рыночная стоимость ЦБ, доступных для торгов руб. (на начало)",
+      "Количество ЦБ (на конец)",
+      "Количество ЦБ, доступное для торгов (на конец)",
+      "На конец Рыночная цена одной ЦБ 1 (руб.)",
+      "Рыночная стоимость ЦБ, доступных для торгов руб. (на конец)",
+      "Плани- руемая позиция по ЦБ"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      172.7412356186,
+      368.31117384799995,
+      410.07500454499996,
+      461.0556806372,
+      484.6738469624,
+      580.2986179376,
+      624.0786335647999,
+      669.298781285,
+      699.541555238,
+      798.6226432364
+    ],
+    "dataStart": 9,
+    "headerRowCount": 9,
+    "xTol": 20,
+    "layoutVersion": 4,
+    "savedAt": "2026-06-16T10:20:54.761Z"
+  },
+  "sectionLayout:aton:trades": {
+    "headers": [
+      "№ п/п Номер № п/п",
+      "col_2",
+      "col_3",
+      "сделки (покупка/ продажа), часть (1-ая, 2-ая) сделки (покупка/ продажа), часть (1-ая, 2-ая)",
+      "col_5",
+      "col_6",
+      "Ставка %, срок репо, дисконт (+/-) Ставка %, срок репо, дисконт (+/-)",
+      "16,31",
+      "Исполненные сделки",
+      "Цена 3 (ЦБ Цена 3 (ЦБ",
+      "Ва- лю- та це- ны/ Ак- тив Ва- лю- та це- ны/ Ак- тив",
+      "Ва- лю- та рас- че- тов Ва- лю- та рас- че- тов",
+      "col_13",
+      "col_14",
+      "Дата поставки план / факт Дата поставки план / факт",
+      "col_16",
+      "Дата расчетов реестре / вышес- тоящем депози- тарии, иност- ранном депози- тарии Дата расчетов реестре / вышес- тоящем депози- тарии, иност- ранном депози- тарии",
+      "Дата оплаты план / факт Дата оплаты план / факт",
+      "col_19",
+      "Комис- сия ООО \"АТОН\" по бирже- вым сдел- кам / Комис- сия ООО \"АТОН\" по бирже- вым сдел- кам /",
+      "сия за / сия руб. сия за / сия руб.",
+      "col_22",
+      "Срок дейст- вия Срок дейст- вия",
+      "ТП",
+      "Порт- фель Порт- фель"
+    ],
+    "columnCenters": [
+      34.0565150627,
+      44.281452923,
+      118.01621608460003,
+      190.07425402363575,
+      222.8578324549999,
+      319.6923143883199,
+      363.41472473180005,
+      375.51183431299995,
+      384.152626871,
+      405.754608266,
+      425.7724443587,
+      444.0621219398,
+      461.86215460927997,
+      515.43506846888,
+      606.9410616581,
+      618.1740919834999,
+      637.0398224017999,
+      666.4185170989999,
+      677.6515474244,
+      702.9978722612,
+      746.7778878884,
+      757.146838958,
+      764.4915126323,
+      769.6759881670998,
+      783.9332958878
+    ],
+    "dataStart": 38,
+    "headerRowCount": 38,
+    "xTol": 4,
+    "layoutVersion": 4,
+    "savedAt": "2026-06-16T10:20:57.855Z"
+  },
+  "sectionLayout:aton:enc_test": {
+    "headers": [
+      "ЦБ",
+      "Кол"
+    ],
+    "columnCenters": [
+      30,
+      240
+    ],
+    "dataStart": 5,
+    "headerRowCount": null,
+    "xTol": null,
+    "layoutVersion": 4,
+    "savedAt": "2026-06-16T10:20:57.874Z"
+  },
+  "sectionLayout:aton:assets:any": {
+    "headers": [
+      "col_1",
+      "col_2",
+      "",
+      "Валюта",
+      "На начало Количество",
+      "В рублях 9",
+      "Количество",
+      "В рублях 9 (2)"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      174.2293721147,
+      284.9275256633,
+      483.9537809158999,
+      550.6318968218001,
+      618.89415803,
+      691.1887890986,
+      767.2277636089999
+    ],
+    "dataStart": 3,
+    "headerRowCount": 3,
+    "xTol": 28,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-19T07:00:32.349Z"
+  },
+  "sectionLayout:aton:encumbered:any": {
+    "headers": [
+      "ЦБ (эмитент / ISIN / код гос. регистрации)",
+      "На начало — Количество ЦБ",
+      "На начало — Рыночная цена одной ЦБ (в валюте цены)",
+      "На начало — Рыночная стоимость ЦБ (всего)",
+      "На начало — НКД (в валюте цены)",
+      "На начало — Валюта цены",
+      "На конец — Количество ЦБ",
+      "На конец — Рыночная цена одной ЦБ (в валюте цены)",
+      "На конец — Рыночная стоимость ЦБ (всего)",
+      "На конец — НКД (в валюте цены)",
+      "На конец — Валюта цены",
+      "Планируемая позиция по ЦБ"
+    ],
+    "columnCenters": [
+      30.456184830200012,
+      239.1313251059,
+      345.00721816127276,
+      389.9707605267201,
+      412.0911894752,
+      469.7095653051363,
+      520.2451096594999,
+      626.4352133533456,
+      671.37257149892,
+      693.4930004473999,
+      751.2553894866361,
+      793.5821809109002
+    ],
+    "dataStart": 8,
+    "headerRowCount": 8,
+    "xTol": 13,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-19T07:00:28.505Z"
+  },
+  "sectionLayout:aton:reserved:any": {
+    "headers": [
+      "col_1",
+      "col_2",
+      "Количество ЦБ (на начало)",
+      "Количество ЦБ, доступное для торгов (на начало)",
+      "На начало Рыночная цена одной ЦБ 1 (руб.)",
+      "Рыночная стоимость ЦБ, доступных для торгов руб. (на начало)",
+      "Количество ЦБ (на конец)",
+      "Количество ЦБ, доступное для торгов (на конец)",
+      "На конец Рыночная цена одной ЦБ 1 (руб.)",
+      "Рыночная стоимость ЦБ, доступных для торгов руб. (на конец)",
+      "Плани- руемая позиция по ЦБ"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      172.7412356186,
+      368.31117384799995,
+      410.07500454499996,
+      461.0556806372,
+      484.6738469624,
+      580.2986179376,
+      624.0786335647999,
+      669.298781285,
+      699.541555238,
+      798.6226432364
+    ],
+    "dataStart": 9,
+    "headerRowCount": 9,
+    "xTol": 20,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-19T07:00:34.420Z"
+  },
+  "sectionLayout:aton:trades:any": {
+    "headers": [
+      "№ п/п",
+      "Организатор торговли, через которого заключена сделка",
+      "№ сделки, дата, время заключения сделки",
+      "Вид сделки (покупка/продажа), часть",
+      "ЦБ (эмитент / ISIN / код гос. регистрации)",
+      "Количество Актива (ЦБ/валюты/драгоценного металла)",
+      "Ставка %, срок репо, дисконт (+/-)",
+      "Цена одного Актива (ЦБ / валюты/драгоценного металла)",
+      "Валюта цены",
+      "Валюта расчетов",
+      "Сумма сделки в валюте расчетов",
+      "Сумма сделки, руб.",
+      "НКД в валюте расчетов",
+      "НКД, руб.",
+      "Дата поставки план / факт",
+      "Дата расчетов в реестре / вышестоящем депозитарии",
+      "Дата оплаты план / факт",
+      "Комиссия ООО \"АТОН\" по биржевым сделкам",
+      "Комиссия биржи за организацию торгов / Клиринговая комиссия НКЦ, руб.",
+      "Срок действия ТП",
+      "Портфель",
+      "col_22",
+      "col_23",
+      "col_24",
+      "col_25",
+      "col_26"
+    ],
+    "columnCenters": [
+      33.9125018534,
+      43.993426504400006,
+      97.2783139454,
+      150.03035251198997,
+      181.09400175800002,
+      248.8762189352,
+      257.8530423149,
+      294.0003578492,
+      306.9615466862,
+      315.6023392442,
+      342.9648490112,
+      349.87748305760005,
+      369.8953191503,
+      388.18499673139996,
+      406.38826638692,
+      459.96118024652,
+      603.4847446348999,
+      614.7177749603,
+      633.5835053786,
+      662.9622000758,
+      674.1952304012,
+      746.7778878884,
+      757.146838958,
+      764.4915126323,
+      769.6759881671,
+      783.9332958878
+    ],
+    "dataStart": 19,
+    "headerRowCount": 19,
+    "xTol": 4,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T12:48:57.678Z"
+  },
+  "sectionLayout:aton:enc_test:01d7412ebea2a8ff0951e1c2": {
+    "headers": [
+      "ЦБ",
+      "Кол"
+    ],
+    "columnCenters": [
+      30,
+      240
+    ],
+    "dataStart": 5,
+    "headerRowCount": null,
+    "xTol": null,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-19T07:00:39.096Z"
+  },
+  "sectionLayout:vtb:assets:any": {
+    "headers": [
+      "col_1",
+      "Валюта",
+      "На начало Количество",
+      "В рублях 3",
+      "На конец Количество",
+      "В рублях 3 (2)"
+    ],
+    "columnCenters": [
+      213.7850002691,
+      492.73858668319997,
+      576.5542744958,
+      645.6806149598,
+      714.8069554238,
+      783.9332958878
+    ],
+    "dataStart": 3,
+    "headerRowCount": 3,
+    "xTol": 40,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-18T05:49:56.143Z"
+  },
+  "sectionLayout:vtb:reserved:any": {
+    "headers": [
+      "ЦБ (эмитент / ISIN / код гос. регистрации)",
+      "col_2",
+      "col_3",
+      "col_4",
+      "col_5",
+      "col_6"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      210.4726964552,
+      262.0294253846,
+      500.80332640399996,
+      552.3600553333999,
+      801.790933841
+    ],
+    "dataStart": 7,
+    "headerRowCount": 7,
+    "xTol": 10,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-18T05:49:56.252Z"
+  },
+  "sectionLayout:vtb:operations:any": {
+    "headers": [
+      "№ п/п",
+      "Дата начисления",
+      "Дата оплаты",
+      "col_4",
+      "",
+      "Описание операции",
+      "col_7",
+      "Портфель"
+    ],
+    "columnCenters": [
+      38.520924551,
+      70.0598173877,
+      120.1764142241,
+      152.5793863166,
+      318.48260343019996,
+      431.38895952139995,
+      755.87952271616,
+      779.9009260274
+    ],
+    "dataStart": 2,
+    "headerRowCount": 2,
+    "xTol": 12,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-18T05:49:56.359Z"
+  },
+  "sectionLayout:aton:operations:any": {
+    "headers": [
+      "Номер брокерского счета 24951000 № п/п 1 2 3 4 5 6 7 8 9 Номер брокерского счета 24951000 № п/п",
+      "Дата принятия Дата принятия распоряжения / Дата операции",
+      "/ оплаты",
+      "col_4",
+      "col_5",
+      "Сумма ввода / вывода / перевода",
+      "В руб.",
+      "Портфель 24951000 Портфель"
+    ],
+    "columnCenters": [
+      39.287074824476015,
+      74.9562665039,
+      141.20234278189994,
+      189.44676789740004,
+      603.6287578442002,
+      653.964254758736,
+      723.6666480599358,
+      777.0206618413998
+    ],
+    "dataStart": 22,
+    "headerRowCount": 22,
+    "xTol": 12,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T11:42:12.053Z"
+  },
+  "sectionLayout:vtb:assets:1bbf87566969619c42ac4294": {
+    "headers": [
+      "Рыночная стоимость актива",
+      "Валюта",
+      "На начало — Количество",
+      "На начало — В рублях",
+      "На конец — Количество",
+      "На конец — В рублях"
+    ],
+    "columnCenters": [
+      213.7850002691,
+      492.73858668319997,
+      576.5542744958,
+      645.6806149598,
+      714.8069554238,
+      783.9332958878
+    ],
+    "dataStart": 3,
+    "headerRowCount": 3,
+    "xTol": 40,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T11:41:30.956Z"
+  },
+  "sectionLayout:vtb:reserved:1bbf87566969619c42ac4294": {
+    "headers": [
+      "ЦБ (значене (наименование ЦБ) вид/категористика / выпуск/транш/ задний ОИИ код по депозитарному)",
+      "На начало — Количество ЦБ",
+      "На начало — Рыночная цена одной ЦБ (в валюте цены)",
+      "На конец — Валюта цены",
+      "На конец — Количество ЦБ",
+      "На конец — Рыночная цена одной ЦБ (в валюте цены)"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      210.4726964552,
+      262.0294253846,
+      500.80332640399996,
+      552.3600553333999,
+      801.790933841
+    ],
+    "dataStart": 7,
+    "headerRowCount": 7,
+    "xTol": 10,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T11:41:32.116Z"
+  },
+  "sectionLayout:vtb:operations:1bbf87566969619c42ac4294": {
+    "headers": [
+      "№ п/п",
+      "Дата начисления",
+      "Дата оплаты",
+      "col_4",
+      "",
+      "Описание операции",
+      "col_7",
+      "Портфель"
+    ],
+    "columnCenters": [
+      38.520924551,
+      70.0598173877,
+      120.1764142241,
+      152.5793863166,
+      318.48260343019996,
+      431.38895952139995,
+      755.87952271616,
+      779.9009260274
+    ],
+    "dataStart": 2,
+    "headerRowCount": 2,
+    "xTol": 12,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T11:41:32.903Z"
+  },
+  "sectionLayout:vtb:assets:a5b5c8ef11258a638d0aa222": {
+    "headers": [
+      "Рыночная стоимость актива",
+      "Валюта",
+      "На начало — Количество",
+      "На начало — В рублях",
+      "На конец — Количество",
+      "На конец — В рублях"
+    ],
+    "columnCenters": [
+      213.7850002691,
+      492.73858668319997,
+      576.5542744958,
+      645.6806149598,
+      714.8069554238,
+      783.9332958878
+    ],
+    "dataStart": 3,
+    "headerRowCount": 3,
+    "xTol": 40,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-16T11:31:06.303Z"
+  },
+  "sectionLayout:vtb:reserved:a5b5c8ef11258a638d0aa222": {
+    "headers": [
+      "ЦБ (звемент (заименование ЦБ) вид/категористика / выпуск/транш/чёрная ОИН код, пос.регистрация)",
+      "На начало — Количество ЦБ",
+      "На начало — Рыночная цена горная ЦБ (в валюте цены)",
+      "На конец — Валюта цены",
+      "На конец — Количество ЦБ",
+      "На конец — Рыночная цена горная ЦБ (в валюте цены)"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      210.4726964552,
+      262.0294253846,
+      500.80332640399996,
+      552.3600553333999,
+      801.790933841
+    ],
+    "dataStart": 7,
+    "headerRowCount": 7,
+    "xTol": 10,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-16T11:31:16.396Z"
+  },
+  "sectionLayout:vtb:operations:a5b5c8ef11258a638d0aa222": {
+    "headers": [
+      "№ п/п",
+      "Дата начисления",
+      "Дата оплаты",
+      "Описание операции",
+      "Сумма, руб.",
+      "Порядков,",
+      "col_7"
+    ],
+    "columnCenters": [
+      38.520924551,
+      70.203830597,
+      120.608453852,
+      153.1554391538,
+      316.4664185,
+      429.37277459119997,
+      756.5707861207999,
+      779.9009260274
+    ],
+    "dataStart": 2,
+    "headerRowCount": 2,
+    "xTol": 12,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-16T11:31:22.407Z"
+  },
+  "sectionLayout:aton:assets:ba6963339068e13ea2e8c5aa": {
+    "headers": [
+      "Валюта",
+      "На начало — Количество",
+      "На начало — В рублях^{9}",
+      "На конец — Количество",
+      "На конец — В рублях^{9}",
+      "col_6",
+      "col_7",
+      "col_8"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      172.8852488279,
+      280.8951558029,
+      475.50500597030003,
+      565.3212441704001,
+      636.175743146,
+      713.942876168,
+      785.0854015622
+    ],
+    "dataStart": 3,
+    "headerRowCount": 3,
+    "xTol": 24,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-18T06:42:09.536Z"
+  },
+  "sectionLayout:aton:encumbered:ba6963339068e13ea2e8c5aa": {
+    "headers": [
+      "ЦБ (эмитент / ISIN / код гос. регистрации)",
+      "На начало — Количество ЦБ",
+      "На начало — Рыночная цена одной ЦБ (в валюте цены)",
+      "На начало — Рыночная стоимость ЦБ (всего)",
+      "На начало — НКД (в валюте цены)",
+      "На начало — Валюта цены",
+      "На конец — Количество ЦБ",
+      "На конец — Рыночная цена одной ЦБ (в валюте цены)",
+      "На конец — Рыночная стоимость ЦБ (всего)",
+      "На конец — НКД (в валюте цены)",
+      "На конец — Валюта цены",
+      "Планируемая позиция по ЦБ"
+    ],
+    "columnCenters": [
+      30.456184830200012,
+      239.1313251059,
+      345.00721816127276,
+      389.9707605267201,
+      412.0911894752,
+      469.7095653051363,
+      520.2451096594999,
+      626.4352133533456,
+      671.37257149892,
+      693.4930004473999,
+      751.2553894866361,
+      793.5821809109002
+    ],
+    "dataStart": 8,
+    "headerRowCount": 8,
+    "xTol": 13,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-18T06:42:26.803Z"
+  },
+  "sectionLayout:aton:assets:61c9c0bf676e04f234f420b8": {
+    "headers": [
+      "Валюта",
+      "На начало — Количество",
+      "На начало — В рублях",
+      "На конец — Количество",
+      "На конец — В рублях",
+      "col_6",
+      "col_7",
+      "col_8"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      174.2293721147,
+      284.9275256633,
+      483.9537809158999,
+      550.6318968218001,
+      618.89415803,
+      691.1887890986,
+      767.2277636089999
+    ],
+    "dataStart": 3,
+    "headerRowCount": 3,
+    "xTol": 28,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-18T06:42:58.259Z"
+  },
+  "sectionLayout:aton:reserved:61c9c0bf676e04f234f420b8": {
+    "headers": [
+      "col_1",
+      "col_2",
+      "Количество ЦБ (на начало)",
+      "Количество ЦБ, доступное для торгов (на начало)",
+      "На начало Рыночная цена одной ЦБ 1 (руб.)",
+      "Рыночная стоимость ЦБ, доступных для торгов руб. (на начало)",
+      "Количество ЦБ (на конец)",
+      "Количество ЦБ, доступное для торгов (на конец)",
+      "На конец Рыночная цена одной ЦБ 1 (руб.)",
+      "Рыночная стоимость ЦБ, доступных для торгов руб. (на конец)",
+      "Плани- руемая позиция по ЦБ"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      172.7412356186,
+      368.31117384799995,
+      410.07500454499996,
+      461.0556806372,
+      484.6738469624,
+      580.2986179376,
+      624.0786335647999,
+      669.298781285,
+      699.541555238,
+      798.6226432364
+    ],
+    "dataStart": 9,
+    "headerRowCount": 9,
+    "xTol": 20,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-18T06:43:08.209Z"
+  },
+  "sectionLayout:aton:trades:61c9c0bf676e04f234f420b8": {
+    "headers": [
+      "№ п/п Номер № п/п",
+      "col_2",
+      "col_3",
+      "сделки (покупка/ продажа), часть (1-ая, 2-ая) сделки (покупка/ продажа), часть (1-ая, 2-ая)",
+      "col_5",
+      "col_6",
+      "Коли- чество Актива (ЦБ/ валюты/ драго- ценного металла) Коли- чество Актива (ЦБ/ валюты/ драго- ценного металла)",
+      "Ставка %, срок репо, дисконт (+/-) Ставка %, срок репо, дисконт (+/-)",
+      "16,31",
+      "Исполненные сделки",
+      "Цена одного Актива (ЦБ валюты/ драго- ценного металла) Цена одного Актива (ЦБ валюты/ драго- ценного металла)",
+      "3",
+      "Ва- лю- та це- ны/ Ак- тив Ва- лю- та це- ны/ Ак- тив",
+      "Ва- лю- та рас- че- тов Ва- лю- та рас- че- тов",
+      "col_15",
+      "col_16",
+      "Дата поставки план / факт Дата поставки план / факт",
+      "col_18",
+      "Дата расчетов реестре / вышес- тоящем депози- тарии, иност- ранном депози- тарии Дата расчетов реестре / вышес- тоящем депози- тарии, иност- ранном депози- тарии",
+      "Дата оплаты план / факт Дата оплаты план / факт",
+      "col_21",
+      "Комис- сия ООО \"АТОН\" по бирже- вым сдел- кам / Комис- сия ООО \"АТОН\" по бирже- вым сдел- кам /",
+      "сия за / сия руб. сия за / сия руб.",
+      "col_24",
+      "Срок дейст- вия ТП Срок дейст- вия ТП",
+      "col_26",
+      "Порт- фель Порт- фель"
+    ],
+    "columnCenters": [
+      34.056515062699994,
+      44.281452922999996,
+      118.01621608460003,
+      190.31931851845297,
+      222.8578324549999,
+      319.6923143883199,
+      328.46751927500003,
+      363.41472473180005,
+      375.51183431299995,
+      384.152626871,
+      398.8419742196,
+      405.754608266,
+      425.77244435869994,
+      444.06212193979997,
+      461.811749986025,
+      515.3846638456249,
+      606.9410616581,
+      618.1740919835,
+      637.0398224017999,
+      666.4185170989999,
+      677.6515474243998,
+      702.9978722612,
+      746.7778878884,
+      757.146838958,
+      764.4915126323001,
+      769.6759881670998,
+      783.9332958878001
+    ],
+    "dataStart": 38,
+    "headerRowCount": 38,
+    "xTol": 4,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T11:18:47.549Z"
+  },
+  "sectionLayout:aton:operations:61c9c0bf676e04f234f420b8": {
+    "headers": [
+      "№ п/п",
+      "Организатор торговли, через которого заключена сделка",
+      "№ сделки (№ Договора к/п), дата, время заключения сделки^{28}",
+      "Вид сделки (покупка/продажа), часть (1-ая, 2-ая)",
+      "ЦБ (эмитент (наименование ЦБ)^{5} / вид / категория (тип)^{7} / выпуск / транш / серия / ISIN / код гос. регистрации) / Инструмент^{22} / Драгоценный металл",
+      "Количество Актива (ЦБ/валюты/драгоценного металла)",
+      "Ставка %, срок репо, дисконт (+/-)^{16,31}",
+      "Цена одного Актива (ЦБ^{3}/валюты/драгоценного металла)"
+    ],
+    "columnCenters": [
+      45.824451594071434,
+      101.45469701510001,
+      197.9435472461,
+      262.0294253846,
+      514.9166209154,
+      601.4274130734714,
+      703.1007388392712,
+      766.9397371903998
+    ],
+    "dataStart": 19,
+    "headerRowCount": 19,
+    "xTol": 12,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T11:19:20.168Z"
+  },
+  "sectionLayout:aton:assets:da34dca30110994b3a0b1636": {
+    "headers": [
+      "ЦБ (эмитент / ISIN / код гос. регистрации)",
+      "col_2",
+      "",
+      "Валюта",
+      "На начало Количество",
+      "В рублях 9",
+      "Количество",
+      "В рублях 9 (2)"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      174.2293721147,
+      284.9275256633,
+      483.9537809158999,
+      550.6318968218001,
+      618.89415803,
+      694.6451061217999,
+      772.06660744148
+    ],
+    "dataStart": 3,
+    "headerRowCount": 3,
+    "xTol": 28,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-18T06:44:10.280Z"
+  },
+  "sectionLayout:aton:reserved:da34dca30110994b3a0b1636": {
+    "headers": [
+      "col_1",
+      "col_2",
+      "Количество ЦБ (на начало)",
+      "Количество ЦБ, доступное для торгов (на начало)",
+      "На начало Рыночная цена одной ЦБ 1 (руб.)",
+      "Рыночная стоимость ЦБ, доступных для руб.",
+      "Количество ЦБ (на конец)",
+      "Количество ЦБ, доступное для торгов (на конец)",
+      "На конец Рыночная цена одной ЦБ 1 (руб.)",
+      "Рыночная стоимость ЦБ, доступных для",
+      "Плани- руемая позиция по ЦБ"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      169.572945014,
+      360.24643412719996,
+      401.14618556839997,
+      451.55080882339996,
+      474.01686947419995,
+      560.1367686356,
+      603.052705007,
+      656.9136452852,
+      679.9557587731999,
+      776.1565825856001
+    ],
+    "dataStart": 9,
+    "headerRowCount": 9,
+    "xTol": 10,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-18T06:44:25.773Z"
+  },
+  "sectionLayout:aton:trades:da34dca30110994b3a0b1636": {
+    "headers": [
+      "№ п/п",
+      "Организатор торговли, через которого заключена сделка",
+      "№ сделки, дата, время заключения сделки",
+      "Вид сделки (покупка/продажа), часть",
+      "ЦБ (эмитент / ISIN / код гос. регистрации)",
+      "Количество Актива (ЦБ/валюты/драгоценного металла)",
+      "Ставка %, срок репо, дисконт (+/-)",
+      "Цена одного Актива (ЦБ / валюты/драгоценного металла)",
+      "Валюта цены",
+      "Валюта расчетов",
+      "Сумма сделки в валюте расчетов",
+      "Сумма сделки, руб.",
+      "НКД в валюте расчетов",
+      "НКД, руб.",
+      "Дата поставки план / факт",
+      "Дата расчетов в реестре / вышестоящем депозитарии",
+      "Дата оплаты план / факт",
+      "Комиссия ООО \"АТОН\" по биржевым сделкам",
+      "Комиссия биржи за организацию торгов / Клиринговая комиссия НКЦ, руб.",
+      "Срок действия ТП",
+      "Портфель",
+      "col_22",
+      "col_23",
+      "col_24",
+      "col_25",
+      "col_26"
+    ],
+    "columnCenters": [
+      33.9125018534,
+      43.993426504400006,
+      97.2783139454,
+      150.03035251198997,
+      181.09400175800002,
+      248.8762189352,
+      257.8530423149,
+      294.0003578492,
+      306.9615466862,
+      315.6023392442,
+      342.9648490112,
+      349.87748305760005,
+      369.8953191503,
+      388.18499673139996,
+      406.38826638692,
+      459.96118024652,
+      603.4847446348999,
+      614.7177749603,
+      633.5835053786,
+      662.9622000758,
+      674.1952304012,
+      746.7778878884,
+      757.146838958,
+      764.4915126323,
+      769.6759881671,
+      783.9332958878
+    ],
+    "dataStart": 19,
+    "headerRowCount": 19,
+    "xTol": 4,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T12:39:35.116Z"
+  },
+  "sectionLayout:aton:operations:da34dca30110994b3a0b1636": {
+    "headers": [
+      "Номер брокерского счета 24951000 № п/п 1 2 3 4 5 6 7 8 9 Номер брокерского счета 24951000 № п/п",
+      "Дата принятия Дата принятия распоряжения / Дата операции",
+      "/ оплаты",
+      "col_4",
+      "col_5",
+      "Сумма ввода / вывода / перевода",
+      "В руб.",
+      "Портфель 24951000 Портфель"
+    ],
+    "columnCenters": [
+      39.287074824476015,
+      74.9562665039,
+      141.20234278189994,
+      189.44676789740004,
+      603.6287578442002,
+      653.964254758736,
+      723.6666480599358,
+      777.0206618413998
+    ],
+    "dataStart": 22,
+    "headerRowCount": 22,
+    "xTol": 12,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T12:07:35.294Z"
+  },
+  "sectionLayout:aton:assets:8a3997040d4ba9aecb37752f": {
+    "headers": [
+      "Валюта",
+      "На начало — Количество",
+      "На начало — В рублях",
+      "На конец — Количество",
+      "На конец — В рублях",
+      "col_6",
+      "col_7",
+      "col_8"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      174.2293721147,
+      284.9275256633,
+      483.9537809158999,
+      554.6642666821999,
+      630.415214774,
+      702.1337930054,
+      772.0666074414801
+    ],
+    "dataStart": 3,
+    "headerRowCount": 3,
+    "xTol": 28,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-18T06:45:23.853Z"
+  },
+  "sectionLayout:aton:reserved:8a3997040d4ba9aecb37752f": {
+    "headers": [
+      "ЦБ (эмитент (наименование ЦБ) / вид / категория (тип) / выпуск / транш / серия / ISIN / код гос. регистрации)",
+      "На начало",
+      "Количество ЦБ",
+      "Рыночная цена одной ЦБ (в валюте цены)",
+      "Рыночная стоимость ЦБ, доступных для торгов (всего)",
+      "Валюта цены",
+      "На конец",
+      "Количество ЦБ",
+      "Рыночная цена одной ЦБ (в валюте цены)",
+      "Рыночная стоимость ЦБ, доступных для торгов (всего)",
+      "Валюта цены",
+      "Планируемая позиция по ЦБ"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      169.572945014,
+      364.5668304062,
+      405.4665818474,
+      449.8226503118,
+      478.62529217179997,
+      565.609270589,
+      608.5252069603999,
+      658.9298302154,
+      684.8522078894,
+      776.1565825856001,
+      808.1275150502
+    ],
+    "dataStart": 9,
+    "headerRowCount": 9,
+    "xTol": 10,
+    "layoutVersion": 7,
+    "savedAt": "2026-06-18T06:45:54.060Z"
+  },
+  "sectionLayout:aton:trades:8a3997040d4ba9aecb37752f": {
+    "headers": [
+      "№ п/п",
+      "Организатор торговли, через которого заключена сделка",
+      "№ сделки (№ Договора к/п), дата, время заключения сделки^{28}",
+      "Вид сделки (покупка/продажа) часть (1-ая, 2-ая)",
+      "ЦБ (эмитент (наименование ЦБ)^{5} / вид / категория (тип)^{7} / выпуск / транш / серия / ISIN / код.пос. регистрации) / Инструмент^{22} / Драгоценный металл",
+      "Количество Актива (ЦБ/валюты/драгоценного металла)",
+      "Ставка %, срок репс. диспонг (+/-)^{18,31}",
+      "Цена одного Актива (ЦБ^{3} / валюты/драгоценного металла)",
+      "Валюта цены/Актив^{23}",
+      "Валюта расчетов",
+      "Сумма сделки в валюте расчетов",
+      "Сумма сделки, руб.^{10,21}",
+      "НКД в валюте расчетов",
+      "НКД, руб.^{10}",
+      "Дата поставки план / факт",
+      "Дата расчетов в реестре / вышестоящее депозитарии, иностранном депозитарии^{30}",
+      "Дата оплаты план / факт",
+      "Комиссия ООО \"АТОН\" по биржевым сделкам /",
+      "Комиссия биржи за организацию торгов / Клиринговая комиссия НКЦ, руб.",
+      "Срок действия ТП",
+      "Портфель",
+      "col_22",
+      "col_23",
+      "col_24",
+      "col_25",
+      "col_26",
+      "col_27"
+    ],
+    "columnCenters": [
+      33.912501853399995,
+      43.9934265044,
+      101.59871022440004,
+      158.41615697587653,
+      189.73479431599995,
+      263.6135706869,
+      271.2462707798,
+      281.90324826799997,
+      311.5699693837999,
+      331.7318186858,
+      345.98912640649996,
+      353.33380008079996,
+      373.3516361735,
+      391.64131375460005,
+      410.29102435895,
+      463.86393821854995,
+      606.9410616581,
+      618.1740919835,
+      637.0398224017999,
+      666.4185170989999,
+      677.6515474243998,
+      702.9978722612,
+      746.7778878884,
+      757.146838958,
+      764.4915126323001,
+      769.6759881670998,
+      783.9332958878001
+    ],
+    "dataStart": 18,
+    "headerRowCount": 18,
+    "xTol": 4,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T11:02:55.879Z"
+  },
+  "sectionLayout:aton:operations:8a3997040d4ba9aecb37752f": {
+    "headers": [
+      "№ п/п",
+      "Организатор торговли, через которого заключена сделка",
+      "№ сделки (№ Договора к/п), дата, время заключения сделки^{28}",
+      "Вид сделки (покупка/ продажа), часть (1-ая, 2-ая)",
+      "ЦБ (эмитент (наименование ЦБ)^{5} / вид / категория (тип)^{7} / выпуск / транш / серия / ISIN / код гос. регистрации) / Инструмент^{22} / Драгоценный металл",
+      "Количество Актива (ЦБ/ валюты/ драгоценного металла)",
+      "Ставка %, срок репс. дискори (+/-)^{18,31}",
+      "Цена одного Актива (ЦБ^{3} / валюты/ драгоценного металла)"
+    ],
+    "columnCenters": [
+      45.57757180670001,
+      101.45469701510001,
+      197.9435472461,
+      262.0294253846001,
+      514.9166209153999,
+      602.6686697821999,
+      704.341995548,
+      766.9397371903998
+    ],
+    "dataStart": 14,
+    "headerRowCount": 14,
+    "xTol": 12,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T11:03:25.239Z"
+  },
+  "sectionLayout:vtb:assets:d70a3bc1a16a35e8a3d0e585": {
+    "headers": [
+      "ЦБ (эмитинг (наименование ЦБ) вид/категористика / выпуск/транш/ сфере/ БИК код по; регистрации)",
+      "На начало — Количество ЦБ",
+      "На начало — Рыночная цена горячей ЦБ (в валюте цены)",
+      "На конец — Валюта цены",
+      "На конец — Количество ЦБ",
+      "На конец — Рыночная цена горячей ЦБ (в валюте цены)"
+    ],
+    "columnCenters": [
+      213.7850002691,
+      492.73858668319997,
+      576.5542744958,
+      645.6806149598,
+      714.8069554238,
+      783.9332958878
+    ],
+    "dataStart": 3,
+    "headerRowCount": 3,
+    "xTol": 40,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T11:49:40.601Z"
+  },
+  "sectionLayout:vtb:reserved:d70a3bc1a16a35e8a3d0e585": {
+    "headers": [
+      "ЦБ (эмитент / ISIN / код гос. регистрации)",
+      "col_2",
+      "col_3",
+      "col_4",
+      "col_5",
+      "col_6"
+    ],
+    "columnCenters": [
+      30.4561848302,
+      210.4726964552,
+      262.0294253846,
+      500.80332640399996,
+      552.3600553333999,
+      801.790933841
+    ],
+    "dataStart": 7,
+    "headerRowCount": 7,
+    "xTol": 10,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T11:49:40.842Z"
+  },
+  "sectionLayout:vtb:operations:d70a3bc1a16a35e8a3d0e585": {
+    "headers": [
+      "№ п/п",
+      "Дата начисления",
+      "Дата оплаты",
+      "col_4",
+      "",
+      "Описание операции",
+      "col_7",
+      "Портфель"
+    ],
+    "columnCenters": [
+      38.520924551,
+      70.203830597,
+      120.608453852,
+      153.1554391538,
+      316.4664185,
+      429.37277459119997,
+      755.87952271616,
+      779.9009260274
+    ],
+    "dataStart": 2,
+    "headerRowCount": 2,
+    "xTol": 12,
+    "layoutVersion": 5,
+    "savedAt": "2026-06-17T11:49:41.154Z"
+  },
+  "scenario:ec93d51fe2e415ea4cc37eb4": {
+    "scenarioId": "uk_card",
+    "confidence": 0.99,
+    "reasoning": "LLM пропущен (skipLlm)",
+    "fallback": null,
+    "savedAt": "2026-06-24T13:16:13.777Z",
+    "fingerprintHash": "ec93d51fe2e415ea4cc37eb4"
+  },
+  "scenario:606d18f46e6f83a98866450d": {
+    "scenarioId": "ks_card_composite_raw",
+    "confidence": 0.98,
+    "reasoning": "LLM пропущен (skipLlm)",
+    "fallback": null,
+    "savedAt": "2026-06-23T13:14:21.289Z",
+    "fingerprintHash": "606d18f46e6f83a98866450d"
+  },
+  "scenario:5978562a0ad05cfc2a41afdd": {
+    "scenarioId": "uk_osv_58",
+    "confidence": 0.98,
+    "reasoning": "LLM пропущен (skipLlm)",
+    "fallback": null,
+    "savedAt": "2026-06-23T13:24:52.959Z",
+    "fingerprintHash": "5978562a0ad05cfc2a41afdd"
+  }
+}

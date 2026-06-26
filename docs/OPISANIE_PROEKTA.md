@@ -332,8 +332,14 @@ Martin — главный UX платформы. Экран: **таблица с
 | `pick_composite_column` | Составная ячейка (ОС + инв. + дата) | номер/буква колонки |
 | `pick_composite_field` | Что извлекать из ячейки | «инвентарный номер», «дата» |
 
-Разбор ответов на фронте: `resolveQuestionAnswerFromText()` в `AiMartin.jsx`.  
-На бэке: `applyAnswer()` + повторный `buildSessionPlan`.
+Разбор ответов:
+- Фронт: `resolveQuestionAnswerFromText()` в `AiMartin.jsx` → при неудаче `POST /api/ai/resolve-answer` (regex + Gemini).
+- Бэк: `orchestrator/answer_resolve.js`, `applyAnswer()` + повторный `buildSessionPlan`.
+
+**Умный диалог** (`MARTIN_SMART_DIALOG=1`):
+- Autostart **не глотает** неоднозначности — задаёт `pick_scenario` / `pick_tree_flatten`.
+- На первом проходе batch-start: черновик + вопрос, без commit в БД до ответа.
+- `assist_martin.js` — объяснения через Gemini (дерево, брокер, compare).
 
 ### 6.6. Черновик (tentative preview)
 
@@ -395,22 +401,32 @@ Martin — главный UX платформы. Экран: **таблица с
 ## 8. Режим результата — команды по таблице
 
 После появления таблицы пользователь пишет команды в чат.  
-Обработка: `POST /api/ai/result-table-action` → `server/result_table_commands.js` + `result_table_llm.js`.
+**Основной путь:** `POST /api/parse/snapshots/:id/apply-operation` → `parse_snapshot_operations.js` (все мутации в БД).  
+**Fallback (только превью):** `POST /api/ai/result-table-action` → `result_table_commands.js` + `result_table_llm.js` + общий `resolveTableCommand`.
+
+Команды `replace_values`, `expand_ks_analytics`, move/rename/add column, `undo_last` требуют snapshot (`needsSnapshot: true` в preview-path).
 
 ### Поддерживаемые действия
 
 | action | Пример в чате | Что делает |
 |--------|---------------|------------|
 | `filter_rows` | «оставь только 2024», `name=ОСВ` | Фильтрация строк |
+| `split_to_table` | «сделай новую таблицу ВТБ» | Копия строк в новый snapshot |
 | `extract` | «вытащи инвентарный номер и дату из колонки ОС» | Новые колонки из текста ячейки |
 | `clean_source` | «убери из колонки ОС номер и дату» | Очистка исходной ячейки |
 | `classify` | «классифицируй по аренде/ремонту» | LLM-классификация (лимит ~120 строк) |
-| `replace_values` | «если "Списание ЦБ" то замени на продажа» | Замена значений в колонке |
-| delete column | «удали колонку Группа» | Удаление колонки (regex + локальная логика) |
+| `replace_values` | «если "Списание ЦБ" то замени на продажа» | Замена значений в колонке (snapshot) |
+| `expand_ks_analytics` | «разбери аналитику» | Раскрытие Аналитика Дт/Кт (snapshot) |
+| `delete_column` | «удали колонку Группа» | Удаление колонки |
+| `move_column` | «перенеси колонку Контрагент после Период» | Порядок колонок |
+| `rename_column` | «переименуй колонку Группа в Категория» | Переименование |
+| `add_column` | «добавь колонку Комментарий» | Пустая колонка |
+| `duplicate_column` | «скопируй колонку ОС как ОС копия» | Дубликат |
+| `undo_last` | «отмени последнее» | Откат filter_rows / delete_column (v1) |
 
-Планировщик: сначала **детерминированные regex** (`result_table_resolve.js`), при необходимости — **LLM planner**.
+Планировщик: сначала **детерминированные regex** (`result_table_resolve.js` / `resolveTableCommand`), при необходимости — **LLM planner**.
 
-Операции логируются в `table_operations`. Рецепты (цепочки команд) — `table_recipes` (API есть).
+Операции логируются в `table_operations` (с `rollback_payload` для undo v1). Рецепты (цепочки команд) — `table_recipes` (API есть).
 
 ---
 
@@ -536,19 +552,24 @@ DB_USER=postgres
 DB_PASSWORD=...
 ```
 
-**LLM:**
+**LLM (Gemini — основной, OpenRouter — fallback):**
 ```env
-LLM_BASE_URL=https://openrouter.ai/api/v1
-# или для Ollama: http://localhost:11434/v1
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=...
+GEMINI_MODEL=gemini-2.0-flash
 
+# Fallback (OpenRouter / Ollama)
+LLM_FALLBACK_PROVIDER=openai
+LLM_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_API_KEY=...
-LLM_API_KEY=...
 QWEN_MODEL=qwen/qwen-2.5-7b-instruct
-LLM_MODEL=...
 LLM_TIMEOUT_MS=20000
 
-# Опционально: LLM в приветствии autostart
-MARTIN_USE_LLM_AUTOSTART=1
+# Умный Martin
+MARTIN_SMART_DIALOG=1          # вопросы вместо молчаливого autostart
+MARTIN_USE_LLM_AUTOSTART=1     # LLM в приветствии
+MARTIN_USE_TOOLS=1             # tool-calling (filter, classify, answer_question)
+MARTIN_BROKER_LLM_PROBE=1      # LLM-поиск секции 1.2 если regex дал 0 строк
 ```
 
 **Python probe (опционально, для тяжёлых Excel):**
@@ -567,10 +588,15 @@ node server/migrate_db.js
 
 ```powershell
 cd server
-npm test
+npm test                  # базовые + fixtures_matrix + scenario_router
+npm run test:fixtures     # матрица tricky Excel (47 тестов)
+npm run test:all          # все *.test.js
+npm run fixtures:generate # пересоздать tricky xlsx
 ```
 
 Обширный набор: парсеры, orchestrator, snapshots, compare, batch-start, tree walker и др.
+
+**Матрица tricky-фикстур:** [`docs/TEST_FIXTURES.md`](TEST_FIXTURES.md) — чеклист ручной проверки через Martin. Реестр: `server/fixtures/manifest.json`, файлы в `server/fixtures/tricky/`.
 
 ---
 
@@ -632,7 +658,7 @@ npm test
 |---------|--------|
 | Универсальная модель ТЗ | `trades` вместо абстрактных `records`; нет `audit_rules` в БД |
 | Project-centric UI | API projects/chats есть, основной UX — один Martin |
-| LLM tool-calling | Упрощённо: chat + result-table-action |
+| LLM tool-calling | `martin_tools.js`: answer_question, filter_table, classify_column, set_file_prefix (`MARTIN_USE_TOOLS=1`) |
 | Kseniya compare UI | API готов, отдельная панель сверки — нет |
 | OPIF Martin → trades | Snapshots отдельно от trades, без ETL |
 | Excel Python probe | Опционально |

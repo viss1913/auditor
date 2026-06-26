@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExtractionRuleV1",
+  "type": "object",
+  "required": ["rule_schema_version", "meta"],
+  "properties": {
+    "rule_schema_version": { "const": 1 },
+    "meta": {
+      "type": "object",
+      "required": ["name", "source_type"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "source_type": { "enum": ["pdf", "excel", "text"] },
+        "profile_hint": { "type": "string" }
+      }
+    },
+    "anchors": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "pattern": { "type": "string", "maxLength": 200 },
+          "after_label": { "type": "string", "maxLength": 80 },
+          "offset": { "type": "integer", "minimum": 0, "maximum": 10 }
+        }
+      }
+    },
+    "tables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "row_mode"],
+        "properties": {
+          "id": { "type": "string" },
+          "row_mode": { "enum": ["state_machine", "regex_rows", "grid"] },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "match": { "type": "string", "maxLength": 200 },
+                "until": { "type": "string", "maxLength": 80 },
+                "join": { "type": "string", "maxLength": 40 },
+                "capture": { "type": "object" }
+              }
+            }
+          },
+          "header_row": { "type": "integer", "minimum": 0 },
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "target": { "type": "string" },
+                "column": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

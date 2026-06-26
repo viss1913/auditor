@@ -43,6 +43,17 @@ function toNum(val) {
     return Number.isNaN(n) ? null : n;
 }
 
+/** «Д 17 305 836,00» или чистое число → { side, value } */
+function parseUkBalanceCell(val) {
+    const raw = String(val ?? '').trim();
+    if (!raw) return { side: '', value: null };
+    const sideMatch = raw.match(/^([ДКDK])\s*/i);
+    const side = sideMatch ? sideMatch[1].toUpperCase() : '';
+    const numPart = raw.replace(/^([ДКDK])\s*/i, '').replace(/\s/g, '').replace(/\u00A0/g, '').replace(',', '.');
+    const value = parseFloat(numPart.replace(/[^\d.-]/g, ''));
+    return { side, value: Number.isFinite(value) ? value : null };
+}
+
 function cellText(row, col) {
     if (!row) return '';
     return String(row[col] ?? '').trim();
@@ -450,6 +461,16 @@ function fixedColumnsStrategy(data, rule, warnings) {
                     .replace(',', '.');
                 const q = parseFloat(qRaw);
                 if (!Number.isNaN(q)) lastEntryAwaitingQty.quantity = q;
+
+                const balanceCol =
+                    multi.balance_column ?? map.balance ?? multi.balance_qty_column ?? null;
+                if (balanceCol != null) {
+                    const bal = parseUkBalanceCell(row[balanceCol]);
+                    if (bal.value != null) {
+                        lastEntryAwaitingQty.current_balance_qty = bal.value;
+                        if (bal.side) lastEntryAwaitingQty.balance_side_qty = bal.side;
+                    }
+                }
             }
             return;
         }
@@ -465,9 +486,11 @@ function fixedColumnsStrategy(data, rule, warnings) {
         if (dateEnd && rowDate > dateEnd) isMatch = false;
 
         if ((pokazatel === 'БУ' || pokazatel === '') && isMatch) {
-            const analytics = String(row[map.analytics ?? 3] ?? '').trim();
-            const parts = analytics.split(',').map((s) => s.trim());
-            const name = parts.slice(0, Math.max(1, parts.length - 1)).join(', ') || analytics;
+            const analyticsDt = String(row[map.analytics ?? 3] ?? '').trim();
+            const analyticsKt =
+                map.analytics_kt != null ? String(row[map.analytics_kt] ?? '').trim() : '';
+            const parts = analyticsDt.split(',').map((s) => s.trim());
+            const name = parts.slice(0, Math.max(1, parts.length - 1)).join(', ') || analyticsDt;
             const regNum = parts.length > 1 ? parts[parts.length - 1] : '';
             const docText = String(row[map.document ?? 1] ?? '').trim();
 
@@ -485,11 +508,30 @@ function fixedColumnsStrategy(data, rule, warnings) {
                 operation_type: extractUkOperationType(docText) || rule.output?.operation_type || '',
                 name,
                 regNum,
+                'Аналитика Дт': analyticsDt,
+                'Аналитика Кт': analyticsKt,
                 quantity: 0,
                 amount,
                 debit_account: dbAcc,
                 credit_account: crAcc,
+                current_balance_bu: null,
+                current_balance_qty: null,
             };
+
+            const balanceCol = multi.balance_column ?? map.balance ?? null;
+            const balanceSideCol = multi.balance_side_column ?? map.balance_side ?? null;
+            if (balanceCol != null) {
+                const bal = parseUkBalanceCell(row[balanceCol]);
+                if (bal.value != null) entry.current_balance_bu = bal.value;
+                if (bal.side) entry.balance_side_bu = bal.side;
+            }
+            if (balanceSideCol != null && balanceSideCol !== balanceCol) {
+                const sideOnly = String(row[balanceSideCol] ?? '').trim();
+                if (sideOnly && !entry.balance_side_bu) {
+                    entry.balance_side_bu = sideOnly.replace(/\s+/g, '').slice(0, 1).toUpperCase();
+                }
+            }
+
             results.push(entry);
             lastEntryAwaitingQty = entry;
         } else if (!isMatch) {
@@ -508,7 +550,12 @@ function fixedColumnsStrategy(data, rule, warnings) {
  * @param {string} filePath
  * @param {Object} rule V2
  */
-function runParseEngine(filePath, rule) {
+/**
+ * @param {string|null} filePath
+ * @param {Object} rule
+ * @param {{ sheetLoad?: object, maxSourceRows?: number }} [engineOpts]
+ */
+function runParseEngine(filePath, rule, engineOpts = {}) {
     const validated = validateParsingRuleV2(rule);
     if (!validated.ok) {
         return { ok: false, errors: validated.errors };
@@ -516,15 +563,27 @@ function runParseEngine(filePath, rule) {
 
     const r = validated.rule;
     const sheetName = r.meta?.sheet_name;
+    const sheetLoad =
+        engineOpts.sheetLoad ||
+        (filePath ? loadSheetRows(filePath, sheetName) : null);
+    if (!sheetLoad?.data) {
+        return { ok: false, errors: ['Нет данных листа (sheetLoad или filePath)'] };
+    }
+
+    let data = sheetLoad.data;
+    const maxSourceRows = engineOpts.maxSourceRows;
+    if (maxSourceRows != null && Number.isFinite(maxSourceRows) && maxSourceRows > 0) {
+        data = data.slice(0, maxSourceRows);
+    }
+
     const {
-        data,
         sheetName: usedSheet,
         rowOutlineLevels,
         hasOutline,
         styleHints,
         skipRowIndices,
         hiddenRowIndices,
-    } = loadSheetRows(filePath, sheetName);
+    } = sheetLoad;
     const warnings = [];
     if (hasOutline) {
         warnings.push('tree_walker: используем группировку строк Excel (outline)');

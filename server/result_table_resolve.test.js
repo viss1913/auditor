@@ -18,4 +18,21 @@ describe('mergeResultTableCommand', () => {
         assert.equal(cmd.stripFromSource, true);
         assert.equal(cmd.extractFields[0].field, 'inventory');
     });
+
+    it('delete_column: LLM не перебивает regex', () => {
+        const h = ['period', 'document', 'name'];
+        const regexCmd = parseResultTableCommand('удали колонку document', h);
+        const cmd = mergeResultTableCommand({
+            message: 'удали колонку document',
+            headers: h,
+            plan: {
+                action: 'none',
+                explanation: 'Подтверди drop column "document"',
+            },
+            regexCmd,
+        });
+        assert.equal(cmd.action, 'delete_column');
+        assert.equal(cmd.sourceColumn, 'document');
+        assert.equal(cmd.planner, 'regex');
+    });
 });

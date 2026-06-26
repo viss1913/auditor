@@ -64,7 +64,11 @@ function buildTemplateMessage({
                 ? `Кол. в колонке **${qtyLetter || probe.quantity_column}**${probe.has_credit_91 ? ', есть переоценки (91)' : ''}.`
                 : '';
             parts.push(
-                `Привет! Это **карточка УК 58.01** — парсим все проводки с Дт 58.01 (включая 91). ${probeLine}`.trim()
+                `Привет! Это **карточка УК 58.01** — парсим **все** проводки карточки (и Дт, и Кт 58.01). ${probeLine}`.trim()
+            );
+        } else if (scenarioId === 'uk_osv_58' || profileHint === 'uk_osv_58') {
+            parts.push(
+                'Привет! Это **ОСВ УК 58** — дерево в Excel, в таблице **БУ и Кол. в колонках** (период / Дебет|Кредит / БУ|Кол.), валюта в отдельной колонке.'
             );
         } else if (scenarioId === 'card_90_tsv' || scenarioId === 'deals_registry_tsv') {
             parts.push(`Привет! Разобрала **текстовую выгрузку 1С** — ${scenarioDisplayName(scenarioId)}.`);
@@ -119,6 +123,26 @@ function buildTemplateMessage({
     return parts.join('\n\n');
 }
 
+function getMartinGeneralChatPrompt() {
+    return `Ты — Martin, AI-помощник аудитора BankFuture. Общаешься по-русски, живо и по делу.
+
+Ты можешь отвечать на ЛЮБЫЕ темы — не только про Excel и аудит.
+Если ниже есть блок «Результат расчёта на сервере» — перескажи его своими словами; цифры бери ТОЛЬКО оттуда, не пересчитывай и не дополняй.
+Если вопрос про цифры таблицы, а расчёта нет — скажи, что без запроса к данным посчитать не можешь.
+НИКОГДА не пиши, что «запустил парсинг» или «разобрал файл», если в контексте нет snapshotId / rowCount после реального парса.
+Не склеивай имя файла с префиксом 1F018_, если в контексте другой файл (например «карт 58.1»).
+Не выдумывай разделы брокера 1.1/1.2 и строки по ним для карточки УК или не-брокерских файлов.
+Если пользователь просит изменить таблицу (фильтр, колонку, замену) — ты САМ это не делаешь и не видишь факт выполнения.
+НИКОГДА не пиши «добавила колонку», «удалила», «применила фильтр», «готово» про изменения таблицы — это делает отдельный движок команд.
+Если просят изменить таблицу в чате — коротко перескажи что понял и скажи, что команда должна уйти в обработчик таблицы (не утверждай что уже сделано).
+
+Контур OPIF брокера (Люба): Excel с именами 1F018_* и похожими. Внутри два раздела — **1.1** (обязательства прекращены) и **1.2** (не исполнены). Парсер сам кладёт repo_percent и exchange_trade_number.
+Если аудитор просит «спарси/разбери брокера» с прикреплёнными файлами — парс запускается по тексту команды; не требуй формулировку «opif_broker» или технический JSON.
+
+ЗАПРЕЩЕНО: длинные простыни, выдуманные числа из таблицы, самостоятельные суммы, JSON и код без запроса.
+Формат: обычный диалог, можно markdown (**жирный**), 2–8 предложений.`;
+}
+
 function getMartinConversationalPrompt() {
     return `Ты — Martin, AI-помощник аудитора BankFuture. Общаешься по-русски, коротко и по делу.
 
@@ -155,6 +179,29 @@ function isValidCellClassificationJson(value) {
     return true;
 }
 
+async function generateMartinConverseReply({ messages, context, fallbackMessage }) {
+    try {
+        const llmMessages = [
+            { role: 'system', content: getMartinGeneralChatPrompt() },
+            {
+                role: 'user',
+                content: `Сводка проекта и сессии:\n${context || '(пусто)'}\n\nОтветь на последнее сообщение пользователя в диалоге.`,
+            },
+        ];
+        const lastFew = (messages || []).filter((m) => m.role !== 'system').slice(-10);
+        for (const m of lastFew) {
+            llmMessages.push({ role: m.role, content: String(m.content || '') });
+        }
+        const { content } = await chatCompletion({ messages: llmMessages, temperature: 0.5 });
+        return content.trim();
+    } catch (e) {
+        const base =
+            fallbackMessage ||
+            'Привет! Я Martin — могу поболтать и помочь с разбором выгрузок. Прикрепи файл или спроси про уже открытую таблицу.';
+        return base + (e.message ? `\n\n_(ИИ временно недоступен: ${e.message})_` : '');
+    }
+}
+
 async function generateMartinReply({ messages, context, fallbackMessage }) {
     try {
         const llmMessages = [
@@ -185,10 +232,15 @@ function buildLlmContext({
     scenarioId,
     needsScenarioChoice,
     awaitingTreeConfirm,
+    opifProbe,
+    pendingQuestion,
 }) {
     const parts = [];
     if (layoutMeta?.recommended) {
         parts.push(`Layout: ${layoutMeta.recommended.layout_type} — ${layoutMeta.recommended.description}`);
+    }
+    if (layoutMeta?.sheetNames?.length) {
+        parts.push(`Листы в книге: ${layoutMeta.sheetNames.join(', ')}`);
     }
     if (layoutMeta?.tree_inference?.summary) {
         parts.push(`tree_inference: ${layoutMeta.tree_inference.summary}`);
@@ -217,8 +269,35 @@ function buildLlmContext({
         if (hints.length) parts.push(`style_hints: ${hints.join('; ')}`);
     }
     if (scenarioId) parts.push(`Сценарий: ${scenarioId}`);
-    if (needsScenarioChoice) parts.push('Требуется выбор: os_01_flat или os_01_hierarchy');
-    if (awaitingTreeConfirm) parts.push('Ждём подтверждения разворота дерева (pick_tree_flatten). Полный парс в БД — только после «Да».');
+    if (needsScenarioChoice) {
+        parts.push(
+            'Требуется выбор сценария: os_01_flat (плоская — тип + метрики) или os_01_hierarchy (группа, узел, ОП, ОС). Спроси аудитора и объясни разницу на примере из файла.'
+        );
+    }
+    if (awaitingTreeConfirm) {
+        parts.push(
+            'Ждём подтверждения разворота дерева (pick_tree_flatten). Покажи примеры уровней иерархии. Полный парс в БД — только после «Да, развернуть».'
+        );
+    }
+    if (pendingQuestion) {
+        parts.push(
+            `Текущий вопрос (${pendingQuestion.id}): ${pendingQuestion.promptTemplate || ''}\nВарианты: ${(pendingQuestion.options || []).map((o) => o.label).join('; ')}`
+        );
+    }
+    if (opifProbe) {
+        parts.push(
+            `OPIF batch: сценарий ${opifProbe.suggestedScenario || scenarioId || '?'}, файлов ${opifProbe.fileCount || 0}, ` +
+                `префикс ${opifProbe.prefix || '1F018_'}, совпадений по префиксу ${opifProbe.prefixMatches || 0}. ` +
+                'Брокер Excel: раздел 1.1 (обязательства прекращены) или 1.2 (не исполнены) — из фразы аудитора; по умолчанию 1.2.'
+        );
+    }
+    if (scenarioId === 'opif_broker' || scenarioId === 'opif_depo') {
+        parts.push(
+            scenarioId === 'opif_broker'
+                ? 'Контур Любови: брокерские отчёты 1F018_*. Раздел 1.1 — прекращённые обязательства; 1.2 — неисполненные (дефолт). Колонки: repo_percent, exchange_trade_number.'
+                : 'Контур Любови: депозитарные PDF, операции зачисления/списания ЦБ.'
+        );
+    }
     const treeSample = getTreeSample(layoutMeta);
     if (treeSample.length) {
         parts.push(`hierarchy_tree_sample:\n${JSON.stringify(treeSample.slice(0, 6))}`);
@@ -229,7 +308,14 @@ function buildLlmContext({
         parts.push(`Пример строки: ${JSON.stringify(preview.rows[0])}`);
     }
     const cmp = formatCompareSummary(compare);
-    if (cmp) parts.push(`Сравнение с эталоном:\n${cmp.text}${cmp.samples.length ? '\n' + cmp.samples.join('\n') : ''}`);
+    if (cmp) {
+        parts.push(
+            `Сравнение с эталоном:\n${cmp.text}${cmp.samples.length ? '\nПримеры расхождений:\n' + cmp.samples.join('\n') : ''}\n` +
+                (cmp.ok
+                    ? 'Объясни аудитору, что совпало — можно сохранять правило.'
+                    : 'Объясни, где именно расхождения и что проверить (ключи, колонки, фильтры).')
+        );
+    }
     if (ruleDiff?.changes?.length) parts.push(`Изменения правила: ${ruleDiff.changes.join('; ')}`);
     if (userMessage) parts.push(`Последний запрос: «${userMessage}»`);
     return parts.join('\n\n');
@@ -245,6 +331,9 @@ function buildDefaultRule(layoutMeta, target) {
 module.exports = {
     buildDefaultRule,
     buildTemplateMessage,
+    getMartinGeneralChatPrompt,
+    getMartinConversationalPrompt,
+    generateMartinConverseReply,
     generateMartinReply,
     buildLlmContext,
     formatCompareSummary,

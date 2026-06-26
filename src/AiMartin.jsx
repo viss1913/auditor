@@ -1,9 +1,145 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import './martin-v2.css';
+import ExcelGridTable from './ExcelGridTable';
+import ReasoningTrace from './ReasoningTrace';
+import WorkspaceTree from './WorkspaceTree';
+import InboxPicker from './InboxPicker';
+import { isTableCommand, isTableQuery, looksLikeTableMutationIntent, looksLikeReconcileIntent, resolvePendingTableConfirmation } from './martinChatIntent.js';
+import { isEgrulIntent } from './egrulIntent.js';
+import { apiBase, normalizeUploadPath, postFormData } from './apiBase.js';
+import { authHeaders } from './auth.js';
+import PdfScenarioBadge from './PdfScenarioBadge.jsx';
+import PdfColumnEditor from './PdfColumnEditor.jsx';
 
-const API = 'http://localhost:3001/api';
+const API = apiBase();
+
+const PARSE_BRIEF_HINT =
+  'Напиши задачу в чате: сценарий, правила, что разобрать — потом Enter. Без текста парс не стартую.';
+
+function hasParseBrief(text) {
+  return String(text || '').trim().length >= 3;
+}
+
+function isInboxTableBrief(text) {
+  const t = String(text || '').trim();
+  if (t.length < 3) return false;
+  return (
+    /(?:созда(?:ть|й)|сдела(?:ть|й)|надо|нужно).{0,24}таблиц[ауе]?\s*:/i.test(t) ||
+    /таблиц[ауе]\s*:[^\n,;]+[,;]/i.test(t) ||
+    /колонк[аи]\s*:/i.test(t)
+  );
+}
+
+function fileMetasFromParseScope(scope) {
+  if (!scope?.path) return [];
+  const rel = String(scope.path).replace(/\\/g, '/');
+  const name = rel.split('/').filter(Boolean).pop() || rel;
+  return [{ name, relativePath: rel }];
+}
+
+function isBrokerInboxFileName(name) {
+  return /^1f\d{3}_/i.test(String(name || ''));
+}
+
+/** Не тащим opif_broker с прошлого парса, если в 📎 выбран один не-брокерский Excel. */
+function resolveScenarioForScopedParse(scenarioId, scope) {
+  if (!scope?.path || scope.type === 'folder') return scenarioId || null;
+  const base = String(scope.path).split('/').pop() || '';
+  if (scenarioId === 'opif_broker' && !isBrokerInboxFileName(base)) return null;
+  if (scenarioId === 'opif_depo' && !/\.pdf$/i.test(base)) return null;
+  return scenarioId || null;
+}
+
+function stripOpifHintsForScopedFile(answers, scope) {
+  if (!scope?.path || scope.type === 'folder') return answers;
+  const base = String(scope.path).split('/').pop() || '';
+  if (isBrokerInboxFileName(base) || /\.pdf$/i.test(base)) return answers;
+  const next = { ...answers };
+  if (next.scenarioId === 'opif_broker' || next.scenarioId === 'opif_depo') {
+    delete next.scenarioId;
+  }
+  delete next.filePrefix;
+  delete next.brokerSection;
+  return next;
+}
+
+function inboxParseLoadingHint(scope, probe, userMessage = '') {
+  if (scope?.path) {
+    const label = String(scope.path).split('/').pop() || scope.path;
+    return scope.type === 'folder'
+      ? `Разбираю папку «${label}»…`
+      : `Разбираю «${label}»…`;
+  }
+  if (probe?.suggestedScenario === 'opif_broker' || /брокер|1f018/i.test(userMessage || '')) {
+    return `Брокер из хранилища — ${probe.prefixMatches || probe.totalFiles || '?'} файл(ов)…`;
+  }
+  if (probe?.byKind?.pdf) {
+    return probe.suggestedScenario === 'opif_depo' ? 'ДЕПО из хранилища…' : 'PDF/сканы из хранилища…';
+  }
+  return 'Разбираю из хранилища…';
+}
+/** Файлов в одной пачке (папка 4000+ → по 1 файлу). */
+const INBOX_UPLOAD_CHUNK = 8;
+const INBOX_FOLDER_SINGLE_THRESHOLD = 30;
+const INBOX_UPLOAD_RETRIES = 2;
+/** Сколько файлов в одном HTTP-запросе batch-start (legacy). */
+const BROKER_UPLOAD_CHUNK = 80;
+function normalizeBrokerPrefix(prefix) {
+  const p = String(prefix || '').trim();
+  if (!p) return '1F018_';
+  return p.endsWith('_') ? p : `${p}_`;
+}
+
+function chunkFileList(files, size = BROKER_UPLOAD_CHUNK) {
+  const chunks = [];
+  for (let i = 0; i < files.length; i += size) {
+    chunks.push(files.slice(i, i + size));
+  }
+  return chunks;
+}
+
+function filterBrokerUploadFiles(files, { filePrefix, scenarioId } = {}) {
+  const prefix = normalizeBrokerPrefix(
+    filePrefix || (scenarioId === 'opif_broker' ? '1F018' : '')
+  );
+  if (!filePrefix && scenarioId !== 'opif_broker') {
+    return { files: files || [], meta: null };
+  }
+  const matched = (files || []).filter(
+    (f) =>
+      String(f.name || '')
+        .toLowerCase()
+        .startsWith(prefix.toLowerCase()) && /\.(xlsx|xls|xlsm)$/i.test(f.name || '')
+  );
+  const chunks = chunkFileList(matched);
+  return {
+    files: matched,
+    meta: {
+      totalStaged: files?.length || 0,
+      prefix,
+      matched: matched.length,
+      uploading: matched.length,
+      chunks: chunks.length,
+    },
+  };
+}
+
+function formatBrokerUploadNote(meta) {
+  if (!meta) return '';
+  if (!meta.matched) {
+    return `Нет excel с префиксом \`${meta.prefix}*\` среди ${meta.totalStaged} файлов в папке.`;
+  }
+  if (meta.chunks > 1) {
+    return `Из папки **${meta.totalStaged}** файлов → **${meta.matched}** с \`${meta.prefix}*\`, разобью на **${meta.chunks}** пачек по ${BROKER_UPLOAD_CHUNK}.`;
+  }
+  if (meta.matched < meta.totalStaged) {
+    return `Из папки **${meta.totalStaged}** файлов → **${meta.uploading}** с \`${meta.prefix}*\`.`;
+  }
+  return `Отправляю **${meta.uploading}** файл(ов) брокера.`;
+}
+
 const CLASSIFY_ROW_LIMIT = 120;
-const SNAPSHOT_PAGE_SIZE = 200;
+const SNAPSHOT_PAGE_SIZE = 50;
 const CHAT_WIDTH_MIN = 280;
 const CHAT_WIDTH_MAX_RATIO = 0.58;
 const TABLE_WIDTH_MIN = 320;
@@ -19,6 +155,18 @@ function readInitialChatWidth() {
     return Math.round(Math.min(560, Math.max(CHAT_WIDTH_MIN, window.innerWidth * 0.36)));
   }
   return 400;
+}
+
+function MartinLoader({ hint = 'Думаю…' }) {
+  return (
+    <div className="mv2-chat-row mv2-chat-row--assistant">
+      <div className="mv2-avatar mv2-avatar--martin">M</div>
+      <div className="mv2-loader-bubble" role="status" aria-live="polite">
+        <span className="mv2-loader-bubble__spinner" aria-hidden />
+        <span className="mv2-loader-bubble__text">{hint}</span>
+      </div>
+    </div>
+  );
 }
 
 const SCENARIO_PHRASES = {
@@ -67,6 +215,14 @@ function resolveQuestionAnswerFromText(text, question) {
     if (/дерев|иерарх|hierarch|с групп/i.test(t)) return 'os_01_hierarchy';
   }
 
+  if (question.id === 'pick_merge_strategy') {
+    if (/одн|общ|скле|merge|вместе/i.test(t)) return 'one_table';
+    if (/групп|структур/i.test(t)) return 'by_group';
+    if (/файл|отдельн|кажд/i.test(t)) return 'per_file';
+    const opt = (question.options || []).find((o) => normalizeText(o.label).includes(t));
+    if (opt) return opt.value;
+  }
+
   const numMatch = t.match(/\b(\d+)\b/);
   if (numMatch && question.id?.includes('column')) {
     const hit = (question.options || []).find((o) => String(o.value) === numMatch[1]);
@@ -113,21 +269,66 @@ function formatChatContent(text) {
 }
 
 function formatTableTab(t) {
-  if (t.sheetName) {
-    const count =
-      t.rowCount != null ? ` (${Number(t.rowCount).toLocaleString('ru-RU')})` : '';
-    return `${t.sheetName}${count}`;
-  }
-  const label = String(t.label || t.sourceFileName || '').trim();
-  let title = label.replace(/\.(xlsx|xls|xlsm|pdf|txt|csv)$/i, '').slice(0, 28);
-  if (/ · \d/.test(label)) {
-    title = label.slice(0, 36);
-  } else if (/1f018|брокер/i.test(label)) title = 'Брокер';
-  else if (/депо|depo|pdf/i.test(label) && !/58/i.test(label)) title = 'Депо';
-  else if (/58\.?1|ук|uk|карт/i.test(label)) title = 'УК 58.01';
+  const src = String(t.sourceFileName || '')
+    .replace(/\.(xlsx|xls|xlsm|pdf|txt|csv)$/i, '')
+    .trim();
+  const sheet = String(t.sheetName || '').trim();
   const count =
     t.rowCount != null ? ` (${Number(t.rowCount).toLocaleString('ru-RU')})` : '';
+
+  if (src && sheet && src.toLowerCase() !== sheet.toLowerCase()) {
+    return `${src} · ${sheet}${count}`;
+  }
+  if (src) return `${src}${count}`;
+  if (sheet) return `${sheet}${count}`;
+
+  const label = String(t.label || '').trim();
+  let title = label.replace(/\.(xlsx|xls|xlsm|pdf|txt|csv)$/i, '').slice(0, 36);
+  if (/ · \d/.test(label)) {
+    title = label.slice(0, 40);
+  } else if (/1f018|брокер/i.test(label)) title = 'Брокер';
+  else if (/upd|упд|счет-фактура/i.test(label)) title = 'УПД';
+  else if (/депо|depo/i.test(label) && /\.pdf$/i.test(label)) title = 'Депо';
+  else if (/\.pdf$/i.test(label)) title = 'PDF';
+  else if (/58\.?1|ук|uk|карт/i.test(label)) title = 'УК 58.01';
   return `${title || `Таблица #${t.snapshotId}`}${count}`;
+}
+
+function mapServerSnapshotsToTabs(snapshots = []) {
+  return snapshots.map((s) => ({
+    snapshotId: s.snapshotId,
+    label: s.label,
+    sheetName: s.sheetName,
+    rowCount: s.rowCount,
+    scenarioId: s.scenarioId,
+    sourceFileName: s.sourceFileName || '',
+  }));
+}
+
+/** Excel с несколькими листами → по умолчанию парсим все, не только defaultSheet. */
+function resolveInboxSheetParse({
+  sheetNames = [],
+  userMessage = '',
+  parseAllSheets,
+  targetSheetName,
+  nextAnswers,
+}) {
+  const count = sheetNames.length;
+  const allSheetsPhrase = /все\s+лист|кажд\w+\s+лист|multi.?sheet|все\s+вкладк/i.test(userMessage || '');
+  const pickedSheet = nextAnswers?.sheetName || null;
+  if (pickedSheet) {
+    return { parseAllSheets: false, sheetName: pickedSheet };
+  }
+  const forceAll =
+    parseAllSheets === true ||
+    parseAllSheets === 1 ||
+    parseAllSheets === '1' ||
+    allSheetsPhrase ||
+    count > 1;
+  if (forceAll) {
+    return { parseAllSheets: true, sheetName: null };
+  }
+  return { parseAllSheets: false, sheetName: targetSheetName || null };
 }
 
 export default function AiMartin() {
@@ -138,8 +339,12 @@ export default function AiMartin() {
   const [chatMessages, setChatMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [aiFile, setAiFile] = useState(null);
-  const [stagedFiles, setStagedFiles] = useState([]);
+  const [inboxReady, setInboxReady] = useState(false);
+  const [inboxUploadCount, setInboxUploadCount] = useState(0);
   const [stagedProbe, setStagedProbe] = useState(null);
+  const [inboxRefreshTick, setInboxRefreshTick] = useState(0);
+  const [parseScope, setParseScope] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(null);
   const [targetFile, setTargetFile] = useState(null);
   const [currentRule, setCurrentRule] = useState(null);
   const [parsePreview, setParsePreview] = useState(null);
@@ -149,10 +354,15 @@ export default function AiMartin() {
   const [ruleDiff, setRuleDiff] = useState(null);
   const [layoutAnalysis, setLayoutAnalysis] = useState(null);
   const [compareResult, setCompareResult] = useState(null);
+  const [validationReport, setValidationReport] = useState(null);
+  const [validationDetailsOpen, setValidationDetailsOpen] = useState(false);
+  const [scenarioResolution, setScenarioResolution] = useState(null);
+  const [gridDiagnostics, setGridDiagnostics] = useState(null);
+  const [pdfColumnEditorOpen, setPdfColumnEditorOpen] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
   const [loadingHint, setLoadingHint] = useState('');
-  const [projects, setProjects] = useState([]);
   const [projectId, setProjectId] = useState('');
+  const [inboxStatus, setInboxStatus] = useState('');
   const [ruleJsonText, setRuleJsonText] = useState('');
   const [previewPage, setPreviewPage] = useState(1);
   const [scenarios, setScenarios] = useState([]);
@@ -166,6 +376,14 @@ export default function AiMartin() {
   const [pendingQuestions, setPendingQuestions] = useState([]);
   const [currentQuestion, setCurrentQuestion] = useState(null);
   const [orchestratorAnswers, setOrchestratorAnswers] = useState({});
+  const [structureGroups, setStructureGroups] = useState([]);
+  const [appendTargetSnapshotId, setAppendTargetSnapshotId] = useState(null);
+  const [reconcilePlan, setReconcilePlan] = useState(null);
+  const [reconcilePanelOpen, setReconcilePanelOpen] = useState(false);
+  const [reconcileLoading, setReconcileLoading] = useState(false);
+  const [reconcileCatalog, setReconcileCatalog] = useState([]);
+  const [reconcileLeftRef, setReconcileLeftRef] = useState('');
+  const [reconcileRightRef, setReconcileRightRef] = useState('');
   const [enrichMode, setEnrichMode] = useState('extract');
   const [enrichSourceColumn, setEnrichSourceColumn] = useState('');
   const [enrichThreshold, setEnrichThreshold] = useState(0.7);
@@ -191,12 +409,10 @@ export default function AiMartin() {
     }
   });
   const tableScrollRef = useRef(null);
-  const chatFileInputRef = useRef(null);
-  const chatFolderInputRef = useRef(null);
-  const chatTargetInputRef = useRef(null);
   const attachMenuRef = useRef(null);
   const bodyLayoutRef = useRef(null);
   const chatWidthRef = useRef(readInitialChatWidth());
+  const parseInFlightRef = useRef(false);
   const [attachOpen, setAttachOpen] = useState(false);
   const [chatWidth, setChatWidth] = useState(readInitialChatWidth);
   const [resizing, setResizing] = useState(false);
@@ -253,12 +469,15 @@ export default function AiMartin() {
       .then((r) => r.json())
       .then((d) => setScenarios(d.scenarios || []))
       .catch(() => {});
-    fetch(`${API}/projects`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data) && data.length) setProjectId(String(data[0].id));
-      })
-      .catch(() => {});
+  }, []);
+
+  const bootstrapMartin = useCallback(async () => {
+    const res = await fetch(`${API}/martin/bootstrap`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'bootstrap failed');
+    setProjectId(String(data.projectId));
+    setChatSessions(data.chats || []);
+    return data;
   }, []);
 
   useEffect(() => {
@@ -307,33 +526,58 @@ export default function AiMartin() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'rows fetch failed');
       const rows = (data.rows || []).map(stripRowMeta);
-      setParsePreview((prev) => ({
-        headers: data.headers || prev?.headers || [],
+      const nextPreview = {
+        headers: data.headers || [],
         rows,
-        rowCount: data.total ?? prev?.rowCount ?? rows.length,
+        rowCount: data.total ?? rows.length,
+        tableMeta: data.tableMeta || null,
+        scenarioId: data.scenarioId || null,
+      };
+      setParsePreview((prev) => ({
+        ...prev,
+        ...nextPreview,
       }));
+      if (activeSheet) {
+        setSheetSessions((prev) => ({
+          ...prev,
+          [activeSheet]: {
+            ...(prev[activeSheet] || {}),
+            snapshotId: sid,
+            parsePreview: nextPreview,
+          },
+        }));
+      }
       if (options.highlightCols?.length) {
         setHighlightHeaders(options.highlightCols);
         requestAnimationFrame(() => {
           const el = tableScrollRef.current;
-          if (el) el.scrollLeft = el.scrollWidth;
+          if (!el) return;
+          const hdrs = nextPreview.headers || [];
+          const col = options.highlightCols[0];
+          const idx = hdrs.indexOf(col);
+          if (idx >= 0) {
+            const colWidth = 120;
+            el.scrollLeft = Math.max(0, idx * colWidth - el.clientWidth / 3);
+          } else {
+            el.scrollLeft = el.scrollWidth;
+          }
         });
       }
       return data;
     } finally {
       setRowsLoading(false);
     }
-  }, []);
+  }, [activeSheet]);
 
   useEffect(() => {
     if (!snapshotId) return;
     reloadSnapshotPage(snapshotId, previewPage);
   }, [snapshotId, previewPage, reloadSnapshotPage]);
 
-  const refreshChatSessions = useCallback(async (pid) => {
-    if (!pid) return [];
-    const response = await fetch(`${API}/projects/${pid}/chats`);
+  const refreshChatSessions = useCallback(async () => {
+    const response = await fetch(`${API}/martin/chats`);
     const data = await response.json();
+    if (data.projectId) setProjectId(String(data.projectId));
     const list = data.chats || [];
     setChatSessions(list);
     return list;
@@ -345,7 +589,13 @@ export default function AiMartin() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'chat load failed');
     setChatSessionId(id);
-    setChatTables(data.snapshots || []);
+    setInboxReady(false);
+    setInboxUploadCount(0);
+    setStagedProbe(null);
+    setParseScope(null);
+    setInboxStatus('');
+    setInboxRefreshTick((t) => t + 1);
+    setChatTables(mapServerSnapshotsToTabs(data.snapshots || []));
     setChatMessages(
       (data.messages || []).map((m) => ({ role: m.role, content: m.content }))
     );
@@ -363,40 +613,64 @@ export default function AiMartin() {
     }
   }, [reloadSnapshotPage]);
 
-  const ensureChatSession = useCallback(async () => {
-    if (!projectId) return null;
-    let list = chatSessions;
-    if (!list.length) {
-      list = await refreshChatSessions(projectId);
-    }
-    if (list.length) {
-      const first = list[0];
-      if (chatSessionId !== first.id) {
-        await loadChatSession(first.id);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await bootstrapMartin();
+        if (cancelled) return;
+        if (data.chatSessionId) {
+          await loadChatSession(data.chatSessionId);
+        } else {
+          const res = await fetch(`${API}/martin/chats`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: 'Новый чат' }),
+          });
+          const created = await res.json();
+          if (!res.ok) throw new Error(created.error || 'create chat failed');
+          if (!cancelled && created.chat?.id) await loadChatSession(created.chat.id);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setChatMessages([
+            {
+              role: 'assistant',
+              content: `Сервер недоступен (${API.replace('/api', '')}). Запусти: **cd server && node index.js**, потом F5.`,
+            },
+          ]);
+        }
       }
-      return first.id;
-    }
-    const response = await fetch(`${API}/projects/${projectId}/chats`, {
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [bootstrapMartin, loadChatSession]);
+
+  const ensureChatSession = useCallback(async () => {
+    if (chatSessionId) return chatSessionId;
+    const response = await fetch(`${API}/martin/chats`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title: 'Новый чат' }),
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'create chat failed');
-    await refreshChatSessions(projectId);
+    if (data.projectId) setProjectId(String(data.projectId));
     setChatSessionId(data.chat.id);
     setChatTables([]);
     setChatMessages([]);
     setActiveTableId(null);
     setSnapshotId(null);
     setParsePreview(null);
+    setInboxReady(false);
+    setInboxUploadCount(0);
+    setStagedProbe(null);
+    setParseScope(null);
+    setInboxRefreshTick((t) => t + 1);
+    await refreshChatSessions();
     return data.chat.id;
-  }, [projectId, chatSessions, chatSessionId, refreshChatSessions, loadChatSession]);
-
-  useEffect(() => {
-    if (!projectId) return;
-    ensureChatSession().catch(() => {});
-  }, [projectId]);
+  }, [chatSessionId, refreshChatSessions]);
 
   const deleteChat = async (id, e) => {
     e?.stopPropagation?.();
@@ -404,7 +678,7 @@ export default function AiMartin() {
     if (!confirm('Удалить этот чат?')) return;
     const response = await fetch(`${API}/chats/${id}`, { method: 'DELETE' });
     if (!response.ok) return;
-    const list = await refreshChatSessions(projectId);
+    const list = await refreshChatSessions();
     if (chatSessionId === id) {
       if (list.length) {
         await loadChatSession(list[0].id);
@@ -416,14 +690,15 @@ export default function AiMartin() {
         setSnapshotId(null);
         setParsePreview(null);
         resetSessionForNewFile();
+        const boot = await bootstrapMartin();
+        if (boot.chatSessionId) await loadChatSession(boot.chatSessionId);
       }
     }
   };
 
   const purgeAllChats = async () => {
-    if (!projectId) return;
-    if (!confirm('Удалить все чаты проекта? Таблицы в чатах останутся в БД, но привязки пропадут.')) return;
-    const response = await fetch(`${API}/projects/${projectId}/chats`, { method: 'DELETE' });
+    if (!confirm('Удалить все чаты? Таблицы в БД останутся, но привязки пропадут.')) return;
+    const response = await fetch(`${API}/martin/chats`, { method: 'DELETE' });
     if (!response.ok) return;
     setChatSessionId(null);
     setChatMessages([]);
@@ -432,25 +707,33 @@ export default function AiMartin() {
     setSnapshotId(null);
     setParsePreview(null);
     resetSessionForNewFile();
-    await refreshChatSessions(projectId);
+    await refreshChatSessions();
     await createNewChat();
   };
 
   const createNewChat = async () => {
-    if (!projectId) return;
-    const response = await fetch(`${API}/projects/${projectId}/chats`, {
+    const response = await fetch(`${API}/martin/chats`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title: 'Новый чат' }),
     });
     const data = await response.json();
     if (!response.ok) return;
+    if (data.projectId) setProjectId(String(data.projectId));
     resetSessionForNewFile();
     setChatMessages([]);
     setChatTables([]);
     setActiveTableId(null);
+    setSnapshotId(null);
+    setParsePreview(null);
+    setInboxReady(false);
+    setInboxUploadCount(0);
+    setStagedProbe(null);
+    setParseScope(null);
+    setInboxStatus('');
     setChatSessionId(data.chat.id);
-    await refreshChatSessions(projectId);
+    setInboxRefreshTick((t) => t + 1);
+    await refreshChatSessions();
   };
 
   const switchChat = async (id) => {
@@ -502,7 +785,7 @@ export default function AiMartin() {
         setParsePreview(null);
       }
     }
-    await refreshChatSessions(projectId);
+    await refreshChatSessions();
   };
 
   const syncChatTablesAfterParse = useCallback(
@@ -522,17 +805,162 @@ export default function AiMartin() {
             {
               snapshotId: sid,
               label: data.link?.label || label,
-              sourceFileName: label,
+              sheetName: parsePreview?.sheetName || '',
+              sourceFileName: label.split(' · ')[0] || label,
               rowCount: parsePreview?.rowCount,
             },
           ];
         });
         setActiveTableId(sid);
-        await refreshChatSessions(projectId);
+        await refreshChatSessions();
       }
     },
-    [chatSessionId, parsePreview, projectId, refreshChatSessions]
+    [chatSessionId, parsePreview, refreshChatSessions]
   );
+
+  const activeSnapshotNumericId = useCallback(() => {
+    const sid =
+      activeTableId && !String(activeTableId).startsWith('draft-')
+        ? activeTableId
+        : snapshotId;
+    const n = parseInt(sid, 10);
+    return Number.isFinite(n) ? n : null;
+  }, [activeTableId, snapshotId]);
+
+  const downloadSnapshotExport = useCallback(
+    async (format) => {
+      const sid = activeSnapshotNumericId();
+      if (!sid) return;
+      try {
+        const resp = await fetch(`${API}/parse/snapshots/${sid}/export?format=${format}`, {
+          headers: authHeaders(),
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.error || resp.statusText);
+        }
+        const blob = await resp.blob();
+        const cd = resp.headers.get('Content-Disposition') || '';
+        const m = /filename\*=UTF-8''([^;]+)|filename="([^"]+)"/i.exec(cd);
+        const filename = decodeURIComponent(m?.[1] || m?.[2] || `snapshot-${sid}.${format}`);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        setChatMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: `Экспорт не вышел: ${e.message}` },
+        ]);
+      }
+    },
+    [API, activeSnapshotNumericId]
+  );
+
+  const loadReconcileCatalog = useCallback(async () => {
+    if (!projectId) return { sources: [] };
+    const sid = activeSnapshotNumericId();
+    const qs = new URLSearchParams({
+      chatSessionId: chatSessionId ? String(chatSessionId) : '',
+      activeSnapshotId: sid ? String(sid) : '',
+    });
+    const resp = await fetch(`${API}/projects/${projectId}/reconcile/sources?${qs}`, {
+      headers: authHeaders(),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || resp.statusText);
+    return data;
+  }, [API, projectId, chatSessionId, activeSnapshotNumericId]);
+
+  const fetchReconcilePlan = useCallback(
+    async (message) => {
+      const sid = activeSnapshotNumericId();
+      const resp = await fetch(`${API}/reconcile/plan`, {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          message,
+          projectId,
+          chatSessionId: chatSessionId || null,
+          activeSnapshotId: sid,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.error || resp.statusText);
+      if (!data.plan) throw new Error(data.error || 'План не составлен');
+      return data;
+    },
+    [API, projectId, chatSessionId, activeSnapshotNumericId]
+  );
+
+  const runReconcileExecute = useCallback(
+    async (plan) => {
+      if (!plan?.left?.ref || !plan?.right?.ref) {
+        throw new Error('В плане нет left/right ref');
+      }
+      setReconcileLoading(true);
+      try {
+        const resp = await fetch(`${API}/reconcile/run`, {
+          method: 'POST',
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({
+            plan,
+            projectId,
+            chatSessionId: chatSessionId || null,
+          }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || resp.statusText);
+        if (data.assistantMessage) {
+          setChatMessages((prev) => [...prev, { role: 'assistant', content: data.assistantMessage }]);
+        }
+        if (data.snapshotId) {
+          const label = data.title || `Сверка #${data.snapshotId}`;
+          await syncChatTablesAfterParse(data.snapshotId, label);
+          setSnapshotId(data.snapshotId);
+          setActiveTableId(data.snapshotId);
+          setWorkMode('result');
+          await reloadSnapshotPage(data.snapshotId, 1);
+          setReconcilePanelOpen(false);
+          setReconcilePlan(null);
+        }
+        return data;
+      } finally {
+        setReconcileLoading(false);
+      }
+    },
+    [API, projectId, chatSessionId, syncChatTablesAfterParse, reloadSnapshotPage]
+  );
+
+  const openReconcilePanel = useCallback(async () => {
+    if (!projectId) {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: 'Сверка работает в проекте — открой или создай проект.' },
+      ]);
+      return;
+    }
+    setReconcilePanelOpen(true);
+    setReconcilePlan(null);
+    setReconcileLoading(true);
+    try {
+      const catalog = await loadReconcileCatalog();
+      setReconcileCatalog(catalog.sources || []);
+      if ((catalog.sources || []).length === 2) {
+        const planData = await fetchReconcilePlan('сверь');
+        setReconcilePlan(planData.plan);
+      }
+    } catch (e) {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: `Каталог сверки: ${e.message}` },
+      ]);
+    } finally {
+      setReconcileLoading(false);
+    }
+  }, [projectId, loadReconcileCatalog, fetchReconcilePlan]);
 
   const applySessionData = (data, explicitSheetName) => {
     const effectiveSheet =
@@ -586,18 +1014,36 @@ export default function AiMartin() {
     setParsePreview(data.parsePreview || null);
     setCompareResult(data.compareResult || null);
     setWarnings(data.warnings || []);
+    setValidationReport(data.validationReport || null);
+    setValidationDetailsOpen(false);
+    setScenarioResolution(data.scenarioResolution || null);
+    setGridDiagnostics(data.gridDiagnostics || null);
+    const isPdf = data.sourceKind === 'pdf' || data.layoutAnalysis?.sourceKind === 'pdf';
+    const validationFailed =
+        data.validationReport &&
+        (data.validationReport.status === 'fail' || data.validationReport.blocksImport);
+    const pdfDraftNeedsReview =
+        isPdf && !data.snapshotId && data.parsePreview?.headers?.length && data.needsConfirm;
+    if (isPdf && (validationFailed || pdfDraftNeedsReview)) {
+      setPdfColumnEditorOpen(true);
+      if (validationFailed) setValidationDetailsOpen(true);
+    }
+    setStructureGroups(data.groups || data.parsePlan?.groups || []);
     setPreviewPage(1);
 
     if (data.multiSheet && Array.isArray(data.snapshots)) {
-      setCurrentQuestion(null);
       setPendingQuestions([]);
       setNeedsScenarioChoice(false);
       setWorkMode('result');
       if (data.sheetNames?.length) setSheetNames(data.sheetNames);
       if (data.snapshots[0]?.sheetName) setActiveSheet(data.snapshots[0].sheetName);
       setChatTables(mapSnapshotsToTables(data.snapshots, aiFile?.name || ''));
-      if (chatSessionId) refreshChatSessions(projectId);
+      if (chatSessionId) refreshChatSessions();
       return;
+    }
+
+    if (data.needsConfirm && data.pendingQuestions?.length) {
+      setWorkMode('result');
     }
 
     if (data.parsePreview?.headers?.length) {
@@ -605,27 +1051,43 @@ export default function AiMartin() {
         effectiveSheet ||
         data.layoutAnalysis?.sheetName ||
         incomingSheetNames[0] ||
-        aiFile?.name ||
         'лист';
+      const fileLabel = (aiFile?.name || data.sourceFileName || '').replace(
+        /\.(xlsx|xls|xlsm|pdf|txt|csv)$/i,
+        ''
+      );
+      const tabTitle = fileLabel || sheetLabel;
       const draftTab = {
-        snapshotId: data.snapshotId || `draft-${sheetLabel}`,
-        label: [sheetLabel, data.parsePreview.rowCount].filter((x) => x != null && x !== '').join(' · '),
+        snapshotId: data.snapshotId || `draft-${tabTitle}-${sheetLabel}`,
+        label: [tabTitle, sheetLabel !== tabTitle ? sheetLabel : null, data.parsePreview.rowCount]
+          .filter((x) => x != null && x !== '')
+          .join(' · '),
         sheetName: sheetLabel,
         rowCount: data.parsePreview.rowCount,
-        sourceFileName: aiFile?.name || '',
+        sourceFileName: aiFile?.name || data.sourceFileName || tabTitle,
         isDraft: !data.snapshotId,
       };
       setChatTables((prev) => {
-        if (data.snapshotId && prev.some((t) => t.snapshotId === data.snapshotId)) return prev;
-        if (!data.snapshotId && prev.some((t) => t.isDraft)) return [draftTab];
+        if (data.snapshotId && prev.some((t) => t.snapshotId === data.snapshotId)) {
+          return prev.map((t) =>
+            t.snapshotId === data.snapshotId ? { ...t, ...draftTab, isDraft: false } : t
+          );
+        }
+        if (!data.snapshotId && prev.some((t) => t.isDraft)) {
+          return [...prev.filter((t) => !t.isDraft), draftTab];
+        }
         if (prev.length > 0 && data.multiSheet) return prev;
         if (prev.length > 0 && !data.snapshotId) return prev;
+        if (data.snapshotId && prev.length > 0) {
+          return [...prev, { ...draftTab, isDraft: false }];
+        }
         return [draftTab];
       });
     }
 
     if (data.snapshotId && chatSessionId) {
-      const label = [aiFile?.name, effectiveSheet].filter(Boolean).join(' · ');
+      const fileLabel = (aiFile?.name || '').replace(/\.(xlsx|xls|xlsm|pdf|txt|csv)$/i, '');
+      const label = [fileLabel, effectiveSheet].filter(Boolean).join(' · ');
       syncChatTablesAfterParse(data.snapshotId, label);
     }
 
@@ -660,54 +1122,207 @@ export default function AiMartin() {
           parsePreview: data.parsePreview || null,
           compareResult: data.compareResult || null,
           warnings: data.warnings || [],
+          validationReport: data.validationReport || null,
         },
       }));
     }
   };
 
+  const handleInboxParseResult = (data) => {
+    applySessionData(data);
+    setWorkMode('result');
+    if (data.assistantMessage) {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: data.assistantMessage, reasoningTrace: data.reasoningTrace },
+      ]);
+    }
+  };
+
   const buildStagingMessage = (probe) => {
-    if (!probe) return 'Файлы прикреплены. Напиши задачу или нажми **Отправить**.';
-    const parts = [`Прикреплено **${probe.fileCount || 0}** файл(ов). Парс **не запущен**.`];
+    if (!probe) {
+      return 'Файлы в **хранилище на сервере**. Парс **не запущен** — напиши задачу.';
+    }
+    const parts = [
+      `В хранилище **${probe.totalFiles || probe.fileCount || 0}** файл(ов). Парс **не запущен**.`,
+    ];
     if (probe.suggestedScenario) {
       parts.push(`Похоже на сценарий: **${probe.suggestedScenario}**.`);
     }
     if (probe.byKind?.pdf) parts.push(`PDF: ${probe.byKind.pdf}.`);
     if (probe.prefixMatches != null && probe.prefix) {
-      parts.push(`С префиксом \`${probe.prefix}\`: **${probe.prefixMatches}**.`);
+      parts.push(`С префиксом \`${probe.prefix}\`: **${probe.prefixMatches}** (можешь уточнить: «только 1F008…»).`);
     }
     if (probe.sampleNames?.length) {
       parts.push(`Примеры: ${probe.sampleNames.slice(0, 3).join(', ')}.`);
     }
-    parts.push('Напиши задачу («депо», «брокер 1F018», «плоско»…) или **Отправить** с пустым полем.');
+    parts.push(
+      'Примеры: «брокер 1F018», «депо», «разбери карточку 76», «ОС плоская, убери иерархию», «как в эталоне».'
+    );
+    parts.push(PARSE_BRIEF_HINT);
+    parts.push('_(файлы уже на сервере — в шапке «Жду команду»)_');
     return parts.join('\n');
   };
 
-  const probeStaged = async (files) => {
-    if (!files?.length) return null;
-    if (files.length === 1 && files[0].size < 8_000_000) {
-      const formData = new FormData();
-      formData.append('file', files[0]);
-      const response = await fetch(`${API}/parse/probe`, { method: 'POST', body: formData });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'probe failed');
-      return data.probe;
+  const uploadFilesToInbox = async (files, onProgress, sessionId = chatSessionId) => {
+    const sid = sessionId || chatSessionId || (await ensureChatSession());
+    if (!sid) throw new Error('Нет активного чата');
+    const picked = Array.from(files || []).filter((f) =>
+      /\.(pdf|xlsx|xls|xlsm|txt|csv|tsv|jpe?g|png|webp|gif|tiff?)$/i.test(f.name || '')
+    );
+    if (!picked.length) throw new Error('Нет PDF, Excel или изображений скана в выборе');
+
+    const isFolder = picked.some((f) => String(f.webkitRelativePath || '').includes('/'));
+    const chunkSize =
+      isFolder && picked.length > INBOX_FOLDER_SINGLE_THRESHOLD ? 1 : INBOX_UPLOAD_CHUNK;
+    const chunks = chunkFileList(picked, chunkSize);
+    let totalSaved = 0;
+    const byKindAcc = {};
+
+    for (let ci = 0; ci < chunks.length; ci += 1) {
+      const chunk = chunks[ci];
+      const isLast = ci === chunks.length - 1;
+      onProgress?.({ chunk: ci + 1, total: chunks.length, files: chunk.length });
+      const fd = new FormData();
+      const meta = chunk.map((f) => ({
+        name: f.name,
+        relativePath: normalizeUploadPath(f.webkitRelativePath || f.name),
+      }));
+      chunk.forEach((f) => {
+        const rel = normalizeUploadPath(f.webkitRelativePath || f.name);
+        fd.append('files', f, rel);
+      });
+      fd.append('filesMeta', JSON.stringify(meta));
+      const q = new URLSearchParams();
+      if (!isLast) q.set('skipProbe', '1');
+      const uploadUrl = `${API}/chats/${sid}/inbox/upload${q.toString() ? `?${q}` : ''}`;
+      const sampleNames = meta.slice(0, 2).map((m) => m.relativePath).join(', ');
+      let response;
+      let lastNetErr = null;
+      for (let attempt = 1; attempt <= INBOX_UPLOAD_RETRIES; attempt += 1) {
+        try {
+          const xhrRes = await postFormData(uploadUrl, fd);
+          response = {
+            ok: xhrRes.ok,
+            status: xhrRes.status,
+            json: async () => JSON.parse(xhrRes.text),
+          };
+          lastNetErr = null;
+          break;
+        } catch (netErr) {
+          lastNetErr = netErr;
+          if (attempt < INBOX_UPLOAD_RETRIES) {
+            await new Promise((r) => setTimeout(r, 600 * attempt));
+          }
+        }
+      }
+      if (lastNetErr) {
+        throw new Error(
+          `сеть оборвалась на пачке ${ci + 1}/${chunks.length} (${chunk.length} файлов, «${sampleNames}»): ${lastNetErr.message}. ${window.location.origin} → ${uploadUrl}`
+        );
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        throw new Error(`пачка ${ci + 1}: сервер ответил не JSON (HTTP ${response.status})`);
+      }
+      if (!response.ok) throw new Error(data.error || `inbox upload failed (пачка ${ci + 1})`);
+      totalSaved += data.saved || 0;
+      Object.entries(data.byKind || {}).forEach(([k, n]) => {
+        byKindAcc[k] = (byKindAcc[k] || 0) + n;
+      });
     }
-    const response = await fetch(`${API}/parse/probe-meta`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        files: files.map((f) => ({
-          name: f.name,
-          relativePath: f.webkitRelativePath || f.name,
-        })),
-      }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'probe-meta failed');
-    return data.probe;
+
+    const probe = await fetchInboxProbe('', sid);
+    return { saved: totalSaved, byKind: byKindAcc, probe, chunks: chunks.length };
   };
 
-  const fetchBatchStart = async (files, target, opts = {}) => {
+  const fetchInboxProbe = useCallback(async (userMessage = '', sessionId = chatSessionId) => {
+    if (!sessionId) return null;
+    const response = await fetch(`${API}/chats/${sessionId}/inbox/probe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userMessage }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'inbox probe failed');
+    return data.probe;
+  }, [chatSessionId]);
+
+  const syncInboxFromServer = useCallback(async () => {
+    if (!chatSessionId) {
+      setInboxReady(false);
+      setInboxUploadCount(0);
+      setStagedProbe(null);
+      setParseScope(null);
+      return;
+    }
+    try {
+      const probe = await fetchInboxProbe('', chatSessionId);
+      const count = probe?.totalFiles || 0;
+      setInboxUploadCount(count);
+      setInboxReady(count > 0);
+      setStagedProbe(probe);
+      if (!count) setParseScope(null);
+    } catch {
+      setInboxReady(false);
+      setInboxUploadCount(0);
+    }
+  }, [chatSessionId, fetchInboxProbe]);
+
+  useEffect(() => {
+    syncInboxFromServer();
+  }, [syncInboxFromServer, inboxRefreshTick]);
+
+  const parseJsonResponse = async (response) => {
+    const text = await response.text();
+    if (!text) return {};
+    try {
+      return JSON.parse(text);
+    } catch (parseErr) {
+      const hint = text.length > 200 ? `${text.slice(0, 200)}…` : text;
+      throw new Error(
+        parseErr?.message?.includes('stack')
+          ? 'Maximum call stack size exceeded'
+          : `Ответ сервера не JSON: ${hint}`
+      );
+    }
+  };
+
+  const recoverParseFromChat = async (sessionId) => {
+    if (!sessionId) return null;
+    try {
+      const loaded = await fetch(`${API}/chats/${sessionId}`);
+      const chatData = await parseJsonResponse(loaded);
+      if (!loaded.ok) return null;
+      const snapshots = chatData.snapshots || [];
+      const lastSnap = snapshots[snapshots.length - 1];
+      const lastAssist = [...(chatData.messages || [])]
+        .reverse()
+        .find((m) => m.role === 'assistant' && /Разобрала|Валидация:/i.test(String(m.content || '')));
+      if (!lastSnap?.snapshotId) return null;
+      return {
+        ok: true,
+        snapshotId: lastSnap.snapshotId,
+        assistantMessage:
+          lastAssist?.content ||
+          `Разобрала **${lastSnap.label || 'таблицу'}** — ${(lastSnap.rowCount ?? 0).toLocaleString('ru-RU')} строк.`,
+        parsePreview: {
+          headers: [],
+          rows: [],
+          rowCount: lastSnap.rowCount ?? 0,
+        },
+        scenarioId: lastSnap.scenarioId || null,
+        scenarioName: lastSnap.scenarioName || null,
+        recoveredFromChat: true,
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const fetchInboxParse = async (opts = {}) => {
     const {
       userMessage = '',
       scenarioId,
@@ -715,110 +1330,255 @@ export default function AiMartin() {
       targetSheetName,
       filePrefix,
       parseAllSheets,
-      knownSheetNames,
+      pathScope,
       chatSessionId: chatSessionIdOverride,
     } = opts;
-    const sheetCount = knownSheetNames?.length ?? sheetNames.length;
-    const multiSheetMode =
-      parseAllSheets === true ||
-      parseAllSheets === '1' ||
-      (parseAllSheets !== false &&
-        files?.length === 1 &&
-        sheetCount > 1 &&
-        !nextAnswers?.sheetName &&
-        !targetSheetName);
-    const formData = new FormData();
-    for (const f of files) formData.append('files', f);
-    if (target) formData.append('target', target);
-    if (projectId) formData.append('project_id', String(projectId));
+    if (!chatSessionId) throw new Error('Нет активного чата');
     const sid = chatSessionIdOverride || chatSessionId;
-    if (sid) formData.append('chatSessionId', String(sid));
-    if (multiSheetMode) {
-      formData.append('parseAllSheets', '1');
-    } else if (targetSheetName) {
-      formData.append('sheetName', targetSheetName);
+    const appendId =
+      opts.appendSnapshotId ||
+      appendTargetSnapshotId ||
+      nextAnswers?.appendSnapshotId ||
+      null;
+    const effectiveMessage =
+      userMessage || (appendId ? 'добавь в таблицу' : '');
+    const sheetScope = resolveInboxSheetParse({
+      sheetNames: opts.knownSheetNames || sheetNames,
+      userMessage,
+      parseAllSheets,
+      targetSheetName,
+      nextAnswers,
+    });
+    const batchTimeoutMs = 1_800_000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), batchTimeoutMs);
+    let response;
+    try {
+      response = await fetch(`${API}/chats/${sid}/inbox/parse`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          userMessage: effectiveMessage,
+          chatSessionId: sid,
+          projectId: projectId || null,
+          scenarioId: scenarioId || null,
+          orchestratorAnswers: nextAnswers || null,
+          sheetName: sheetScope.sheetName,
+          parseAllSheets: sheetScope.parseAllSheets ? true : null,
+          filePrefix: filePrefix || nextAnswers?.filePrefix || null,
+          pathScope: pathScope || null,
+          appendSnapshotId: appendId,
+        }),
+      });
+    } catch (netErr) {
+      if (netErr?.name === 'AbortError') {
+        const recovered = await recoverParseFromChat(sid);
+        if (recovered) return recovered;
+        throw new Error(
+          `Парс занял больше ${Math.round(batchTimeoutMs / 1000)} сек — обнови чат: иногда таблица уже в БД.`
+        );
+      }
+      throw new Error(
+        `API на ${API.replace('/api', '')} не отвечает — запусти сервер (cd server && node index.js)`
+      );
+    } finally {
+      clearTimeout(timeoutId);
     }
-    if (scenarioId) formData.append('scenarioId', scenarioId);
-    if (filePrefix) formData.append('filePrefix', filePrefix);
-    if (nextAnswers) formData.append('orchestratorAnswers', JSON.stringify(nextAnswers));
-    formData.append('userMessage', userMessage);
-    const response = await fetch(`${API}/parse/batch-start`, { method: 'POST', body: formData });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'batch-start failed');
+    let data;
+    try {
+      data = await parseJsonResponse(response);
+    } catch (parseErr) {
+      const recovered = await recoverParseFromChat(sid);
+      if (recovered) return recovered;
+      throw parseErr;
+    }
+    if (!response.ok) {
+      const err = new Error(data.error || 'inbox parse failed');
+      err.validationReport = data.validationReport || data.skipped?.[0]?.validationReport || null;
+      err.reasoningTrace = data.reasoningTrace || data.skipped?.[0]?.reasoningTrace || null;
+      throw err;
+    }
     return data;
   };
 
-  const runBatchStart = async (files, target, opts = {}) => {
-    if (!files?.length) return null;
+  const runEgrulFetch = async (userMessage) => {
     setAiLoading(true);
-    const bigHint =
-      files.some((f) => f.size > 2_000_000) || files.length > 5
-        ? 'Много файлов или большой объём — подожди, не закрывай вкладку.'
-        : null;
-    setLoadingHint(bigHint || 'Разбираю файлы…');
+    setWorkMode('result');
+    setLoadingHint('Запрашиваю выписки ЕГРЮЛ…');
+    try {
+      const sid =
+        activeTableId && !String(activeTableId).startsWith('draft-')
+          ? activeTableId
+          : snapshotId;
+      const activeSnap =
+        sid && !String(sid).startsWith('draft-') ? parseInt(sid, 10) : null;
+      const response = await fetch(`${API}/egrul/fetch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: userMessage,
+          projectId: projectId || null,
+          chatSessionId: chatSessionId || null,
+          sourceSnapshotId: Number.isFinite(activeSnap) ? activeSnap : null,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      applySessionData({
+        snapshotId: data.snapshotId,
+        parsePreview: data.parsePreview,
+        scenarioId: data.scenarioId || 'egrul_check',
+        sourceFileName: data.sourceFileName || 'ЕГРЮЛ',
+      });
+      if (data.assistantMessage) {
+        setChatMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: data.assistantMessage },
+        ]);
+      }
+      if (chatSessionId && data.snapshotId) {
+        await refreshChatSessions();
+      }
+    } catch (e) {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: `ЕГРЮЛ: ${e.message}` },
+      ]);
+    } finally {
+      setAiLoading(false);
+      setLoadingHint('');
+    }
+  };
+
+  const runInboxParse = async (opts = {}) => {
+    if (parseInFlightRef.current) {
+      return null;
+    }
+    if (!inboxReady && !chatSessionId) {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: 'Сначала создай **чат** и загрузи файлы **слева** в Хранилище.' },
+      ]);
+      return null;
+    }
+    if (!inboxReady) {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: 'В хранилище пусто — загрузи папку **слева** (кнопка «Папка»).' },
+      ]);
+      return null;
+    }
+    setAiLoading(true);
+    parseInFlightRef.current = true;
+    const probe = stagedProbe || {};
+    const effectiveScope = opts.pathScope ?? parseScope;
+    setLoadingHint(inboxParseLoadingHint(effectiveScope, probe, opts.userMessage || ''));
     try {
       const sessionId = opts.chatSessionId || chatSessionId || (await ensureChatSession());
-      let data = await fetchBatchStart(files, target, { ...opts, chatSessionId: sessionId });
-      const knownSheets = opts.knownSheetNames?.length ?? sheetNames.length;
-      if (knownSheets > 1 && data.previewIsTentative && !data.multiSheet) {
-        data = await fetchBatchStart(files, target, {
-          ...opts,
-          chatSessionId: sessionId,
-          parseAllSheets: true,
-          knownSheetNames: opts.knownSheetNames || sheetNames,
-          nextAnswers: undefined,
-          targetSheetName: undefined,
-        });
-      }
+      const data = await fetchInboxParse({ ...opts, chatSessionId: sessionId, pathScope: opts.pathScope ?? parseScope });
       applySessionData(data, opts.targetSheetName);
-      setStagedFiles([]);
-      setStagedProbe(null);
+      setInboxReady(true);
+      if (data.appendMode) setAppendTargetSnapshotId(null);
+      if (sessionId && (data.snapshotId || data.multiSheet)) {
+        try {
+          const loaded = await fetch(`${API}/chats/${sessionId}`);
+          const chatData = await loaded.json();
+          if (loaded.ok && chatData.snapshots?.length) {
+            setChatTables(mapServerSnapshotsToTabs(chatData.snapshots));
+          }
+        } catch {
+          /* applySessionData уже добавила вкладку */
+        }
+        await refreshChatSessions();
+      }
       setChatMessages((prev) => [
         ...prev,
         {
           role: 'assistant',
           content: data.assistantMessage || 'Готово.',
+          reasoningTrace: data.reasoningTrace || null,
           artifact: data.multiSheet
             ? null
             : data.snapshotId
               ? {
                   snapshotId: data.snapshotId,
-                  label: files[0]?.name || 'Таблица',
+                  label: data.sourceFileName || 'Таблица',
                   rowCount: data.parsePreview?.rowCount ?? 0,
                 }
               : null,
         },
       ]);
       if (data.multiSheet && Array.isArray(data.snapshots)) {
-        setChatTables(mapSnapshotsToTables(data.snapshots, files[0]?.name || ''));
-        if (sessionId) {
-          const loaded = await fetch(`${API}/chats/${sessionId}`);
-          const chatData = await loaded.json();
-          if (loaded.ok && chatData.snapshots?.length) {
-            setChatTables(chatData.snapshots);
+        setCurrentQuestion(null);
+        setChatTables(mapSnapshotsToTables(data.snapshots, 'inbox'));
+      }
+      if (data.snapshotId && sessionId) {
+        setActiveTableId(data.snapshotId);
+        setSnapshotId(data.snapshotId);
+        setPreviewPage(1);
+        if (!data.recoveredFromChat) {
+          try {
+            await reloadSnapshotPage(data.snapshotId, 1);
+          } catch (loadErr) {
+            setChatMessages((prev) => [
+              ...prev,
+              {
+                role: 'assistant',
+                content: `Парс ок (${(data.parsePreview?.rowCount ?? 0).toLocaleString('ru-RU')} строк), но превью из БД не подтянулось: ${loadErr.message}`,
+              },
+            ]);
           }
-          await refreshChatSessions(projectId);
         }
-      } else if (data.snapshotId && sessionId) {
-        const loaded = await fetch(`${API}/chats/${sessionId}`);
-        const chatData = await loaded.json();
-        if (loaded.ok) setChatTables(chatData.snapshots || []);
-        await refreshChatSessions(projectId);
       }
       setActiveFilterCount(0);
       setWorkMode('result');
       setPreviewPage(1);
       return data;
     } catch (e) {
+      if (e.validationReport) {
+        setValidationReport(e.validationReport);
+        setValidationDetailsOpen(true);
+      }
       setChatMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: `Не смогла разобрать: ${e.message}` },
+        {
+          role: 'assistant',
+          content: `Не вышло: ${e.message}`,
+          reasoningTrace: e.reasoningTrace || null,
+        },
       ]);
       return null;
     } finally {
+      parseInFlightRef.current = false;
       setAiLoading(false);
       setLoadingHint('');
     }
+  };
+
+  const fetchBatchStart = async (_files, _target, opts = {}) => fetchInboxParse(opts);
+
+  const runBatchStart = async (_files, _target, opts = {}) => runInboxParse(opts);
+
+  const fetchPlanPreview = async (userMessage, files, probe) => {
+    const response = await fetch(`${API}/parse/plan-preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userMessage,
+        files: (files || []).map((f) => ({
+          name: f.name,
+          relativePath: f.relativePath || f.webkitRelativePath || f.name,
+        })),
+        probe,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) return { parsePlan: null, reasoningTrace: null };
+    return {
+      parsePlan: data.parsePlan || null,
+      reasoningTrace: data.reasoningTrace || null,
+    };
   };
 
   const fetchAutoStart = async (source, target, scenarioId, nextAnswers, targetSheetName) => {
@@ -841,8 +1601,10 @@ export default function AiMartin() {
     setAiLoading(true);
     const bigHint =
       source?.size > 2_000_000 ? 'Большой файл — может занять 1–3 минуты. Не закрывай вкладку.' : null;
+    const isPdf = /\.pdf$/i.test(source?.name || '');
     setLoadingHint(
-      bigHint || 'Читаю файл, строю превью… (Excel может занять до минуты)'
+      bigHint ||
+        (isPdf ? 'Читаю PDF, извлекаю таблицу…' : 'Читаю файл, строю превью… (Excel может занять до минуты)')
     );
     try {
       const data = await fetchAutoStart(source, target, scenarioId, nextAnswers, targetSheetName);
@@ -855,7 +1617,7 @@ export default function AiMartin() {
         const loaded = await fetch(`${API}/chats/${chatSessionId}`);
         const chatData = await loaded.json();
         if (loaded.ok) setChatTables(chatData.snapshots || []);
-        await refreshChatSessions(projectId);
+        await refreshChatSessions();
       }
       setPreviewPage(1);
       return data;
@@ -869,16 +1631,14 @@ export default function AiMartin() {
   };
 
   const pickScenario = (scenarioId) => {
-    const files = stagedFiles.length ? stagedFiles : aiFile ? [aiFile] : [];
-    if (!files.length) return;
+    if (!inboxReady) return;
     setNeedsScenarioChoice(false);
     startParseFromStaged(SCENARIO_PHRASES[scenarioId] || '', scenarioId);
   };
 
   const startParseFromStaged = async (userMessage, scenarioIdOverride) => {
-    const files = stagedFiles.length ? stagedFiles : aiFile ? [aiFile] : [];
-    if (!files.length) return;
-    await runBatchStart(files, targetFile, {
+    if (!inboxReady) return;
+    await runInboxParse({
       userMessage: userMessage || '',
       scenarioId: scenarioIdOverride,
       nextAnswers: orchestratorAnswers,
@@ -888,6 +1648,9 @@ export default function AiMartin() {
 
   const resetSessionForNewFile = () => {
     setStagedProbe(null);
+    setInboxReady(false);
+    setInboxUploadCount(0);
+    setAiFile(null);
     setParsePreview(null);
     setSnapshotId(null);
     setCompareResult(null);
@@ -906,6 +1669,124 @@ export default function AiMartin() {
     setScenarioName('');
   };
 
+  const hasExistingChatWork = () =>
+    chatTables.length > 0 ||
+    Boolean(
+      (snapshotId && !String(snapshotId).startsWith('draft-')) ||
+        (activeTableId && !String(activeTableId).startsWith('draft-'))
+    ) ||
+    Boolean(parsePreview?.headers?.length) ||
+    chatMessages.length > 0;
+
+  const dedupeStagedFiles = (files) => {
+    const seen = new Set();
+    return files.filter((f) => {
+      const key = `${f.webkitRelativePath || ''}|${f.name}|${f.size}|${f.lastModified}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+
+  const stageAttachments = async (files, { merge = false } = {}) => {
+    const picked = dedupeStagedFiles(Array.from(files || []));
+    if (!picked.length) return;
+
+    let sid = chatSessionId;
+    if (!sid) {
+      try {
+        sid = await ensureChatSession();
+      } catch (e) {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: `Не могу создать чат: ${e.message}. Проверь, что сервер на :3001 запущен (cd server && node index.js).`,
+          },
+        ]);
+        return;
+      }
+    }
+
+    setAttachOpen(false);
+    const keepChat = hasExistingChatWork();
+    if (!keepChat) {
+      resetSessionForNewFile();
+    } else {
+      setStagedProbe(null);
+      setCurrentQuestion(null);
+      setPendingQuestions([]);
+    }
+
+    setAiFile(picked[picked.length - 1]);
+    setWorkMode(keepChat ? 'result' : 'parse');
+
+    setAiLoading(true);
+    setLoadingHint(`Загружаю в хранилище… 0/${picked.length}`);
+    setUploadProgress(null);
+
+    try {
+      const uploaded = await uploadFilesToInbox(picked, (p) => {
+        setUploadProgress(p);
+        setLoadingHint(
+          `Загружаю в хранилище… пачка ${p.chunk}/${p.total} (${p.files} файлов)`
+        );
+      });
+      setInboxReady(true);
+      setInboxUploadCount((prev) => (merge ? prev + uploaded.saved : uploaded.saved));
+      const probe = uploaded.probe || (await fetchInboxProbe(''));
+      setStagedProbe(probe);
+
+      if (picked.length === 1) {
+        try {
+          const meta = await fetchSheetNames(picked[0]);
+          if (meta.sheetNames?.length) {
+            setSheetNames(meta.sheetNames);
+            setActiveSheet(meta.defaultSheet || meta.sheetNames[0]);
+          }
+        } catch {
+          /* не критично */
+        }
+      } else {
+        setSheetNames([]);
+        setActiveSheet('');
+      }
+
+      const intro = keepChat
+        ? `Добавила **${uploaded.saved}** файл(ов) в хранилище (${uploaded.chunks} пачек). Вкладки **не трогаю**.`
+        : `Загрузила **${uploaded.saved}** файл(ов) на сервер (${uploaded.chunks} пачек). **📎** — выбери что парсить. **Напиши задачу** в чате (сценарий, правила).`;
+      const byKind = uploaded.byKind
+        ? Object.entries(uploaded.byKind)
+            .filter(([, n]) => n > 0)
+            .map(([k, n]) => `${k}: ${n}`)
+            .join(', ')
+        : '';
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: [intro, byKind ? `Разложила: ${byKind}.` : null, buildStagingMessage(probe)]
+            .filter(Boolean)
+            .join('\n\n'),
+        },
+      ]);
+      setInboxStatus(intro);
+      setInboxRefreshTick((t) => t + 1);
+    } catch (e) {
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `Не загрузила в хранилище: ${e.message}`,
+        },
+      ]);
+    } finally {
+      setAiLoading(false);
+      setLoadingHint('');
+      setUploadProgress(null);
+    }
+  };
+
   const fetchSheetNames = async (source) => {
     const formData = new FormData();
     formData.append('file', source);
@@ -915,149 +1796,66 @@ export default function AiMartin() {
     return data;
   };
 
-  const handleFilesPick = async (fileList) => {
-    const files = Array.from(fileList || []);
-    if (!files.length) return;
-    setAttachOpen(false);
-    if (files[0]?.webkitRelativePath) {
-      await handleFolderPick(fileList);
-      return;
-    }
-    if (files.length === 1) {
-      await handleSourceFilePick(files[0]);
-      return;
-    }
-    resetSessionForNewFile();
-    setAiFile(files[0]);
-    setStagedFiles(files);
-    setWorkMode('parse');
-    if (!chatSessionId) await ensureChatSession();
-    setChatMessages((prev) => [
-      ...prev,
-      {
-        role: 'assistant',
-        content: `Прикрепила **${files.length}** файлов. Напиши задачу в чате — разберу пакетом.`,
-      },
-    ]);
-  };
-
-  const handleSourceFilePick = async (f) => {
-    if (!f) {
-      setAiFile(null);
-      setStagedFiles([]);
-      return;
-    }
-    setAttachOpen(false);
-    resetSessionForNewFile();
-    setAiFile(f);
-    setStagedFiles([f]);
-    setWorkMode('parse');
-    setChatMessages([]);
-    setCurrentQuestion(null);
-    setPendingQuestions([]);
-
-    if (projectId) {
-      try {
-        const response = await fetch(`${API}/projects/${projectId}/chats`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: f.name || 'Новый чат' }),
-        });
-        const data = await response.json();
-        if (response.ok) {
-          setChatSessionId(data.chat.id);
-          setChatTables([]);
-          await refreshChatSessions(projectId);
-        }
-      } catch {
-        if (!chatSessionId) await ensureChatSession();
-      }
-    } else if (!chatSessionId) {
-      await ensureChatSession();
-    }
-
-    let sheetToParse = undefined;
-    let meta = null;
-    try {
-      meta = await fetchSheetNames(f);
-      if (meta.sheetNames?.length) {
-        setSheetNames(meta.sheetNames);
-        sheetToParse = meta.defaultSheet || meta.sheetNames[0];
-        setActiveSheet(sheetToParse);
-      }
-    } catch {
-      /* probe / batch-start подхватят */
-    }
-
-    const sheetCount = meta?.sheetNames?.length ?? 0;
-    if (sheetCount > 1) {
+  const runParseFromScope = async (userMessage = '') => {
+    if (!parseScope?.path) {
       setChatMessages((prev) => [
         ...prev,
         {
           role: 'assistant',
-          content: `В файле **${sheetCount}** листа — разбираю все и покажу вкладками…`,
+          content: 'Выбери **папку или файл** через 📎 — что парсить из хранилища.',
         },
       ]);
-    } else {
+      return;
+    }
+    const msg = userMessage || inputText.trim();
+    if (!hasParseBrief(msg)) {
       setChatMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: `Разбираю **${f.name}**…` },
+        {
+          role: 'assistant',
+          content: `Выбрано: **${parseScope.path}**. ${PARSE_BRIEF_HINT}`,
+        },
       ]);
+      return;
     }
-    await runBatchStart([f], null, {
-      userMessage: '',
-      parseAllSheets: sheetCount > 1,
-      knownSheetNames: meta?.sheetNames,
+    setChatMessages((prev) => [...prev, { role: 'user', content: msg }]);
+    setInputText('');
+    await runInboxParse({
+      userMessage: msg,
+      pathScope: parseScope,
+      scenarioId: orchestratorAnswers?.scenarioId,
+      nextAnswers: orchestratorAnswers,
+      targetSheetName: activeSheet || undefined,
     });
   };
 
-  const handleFolderPick = async (fileList) => {
+  const handleWorkspaceUpload = async (fileList) => {
     const all = Array.from(fileList || []);
-    const relevant = all.filter((f) => /\.(pdf|xlsx|xls|xlsm|txt|csv|tsv)$/i.test(f.name));
+    const relevant = all.filter((f) =>
+      /\.(pdf|xlsx|xls|xlsm|txt|csv|tsv|jpe?g|png|webp|gif|tiff?)$/i.test(f.name)
+    );
     if (!relevant.length) {
-      alert('В папке нет PDF или Excel.');
+      alert('Нет PDF, Excel или изображений в выборе');
       return;
     }
-    resetSessionForNewFile();
-    setStagedFiles(relevant);
-    setAiFile(relevant[0]);
-    setWorkMode('parse');
-    if (!chatSessionId) await ensureChatSession();
-    setSheetNames([]);
-    setActiveSheet('');
-
-    try {
-      const probe = await probeStaged(relevant);
-      setStagedProbe(probe);
-      setChatMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: buildStagingMessage(probe) },
-      ]);
-    } catch (e) {
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          content: `Папка: **${relevant.length}** файлов. Напиши задачу («депо», «брокер»…).\n(${e.message})`,
-        },
-      ]);
-    }
+    await stageAttachments(relevant, { merge: hasExistingChatWork() });
   };
 
   const handleTargetFilePick = (t) => {
     setTargetFile(t);
-    if (t && stagedFiles.length && parsePreview) {
-      runBatchStart(stagedFiles, t, {
-        userMessage: '',
-        targetSheetName: activeSheet || undefined,
-        nextAnswers: orchestratorAnswers,
-      });
+    if (t) {
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `Эталон **${t.name}** прикреплён. Напиши задачу — когда запустишь парс, сверю колонки.`,
+        },
+      ]);
     }
   };
 
   const answerPendingQuestion = (questionId, value) => {
-    const files = stagedFiles.length ? stagedFiles : aiFile ? [aiFile] : [];
-    if (!files.length) return;
+    if (!inboxReady) return;
     const next = { ...(orchestratorAnswers || {}) };
     if (questionId === 'pick_scenario') next.scenarioId = value;
     if (questionId === 'pick_sheet') next.sheetName = value;
@@ -1076,11 +1874,26 @@ export default function AiMartin() {
         ? [...next.compositeExtracts, value]
         : [value];
     }
+    if (questionId === 'pick_merge_strategy') {
+      next.mergeStrategy = value;
+      next.pick_merge_strategy = value;
+    }
 
     setOrchestratorAnswers(next);
 
+    if (questionId === 'pick_merge_strategy') {
+      const lastUser =
+        [...chatMessages].reverse().find((m) => m.role === 'user' && String(m.content || '').trim())
+          ?.content || 'разбери файлы';
+      runInboxParse({
+        userMessage: lastUser,
+        nextAnswers: next,
+      });
+      return;
+    }
+
     if (questionId === 'pick_tree_flatten' && sheetNames.length > 1) {
-      runBatchStart(files, targetFile, {
+      runInboxParse({
         userMessage: '',
         parseAllSheets: true,
         knownSheetNames: sheetNames,
@@ -1098,20 +1911,198 @@ export default function AiMartin() {
         setActiveSheet(osv);
       }
     }
-    runBatchStart(files, targetFile, {
+    runInboxParse({
       userMessage: '',
+      pathScope: parseScope,
       scenarioId: next.scenarioId || null,
-      nextAnswers: next,
+      nextAnswers: stripOpifHintsForScopedFile(next, parseScope),
       targetSheetName: sheetForParse,
     });
   };
 
+  const buildUiContextForConverse = useCallback(() => {
+    const activeTab = chatTables.find(
+      (t) => t.snapshotId === activeTableId || t.snapshotId === snapshotId
+    );
+    return {
+      fileName: aiFile?.name || activeTab?.sourceFileName || '',
+      sheetName: activeSheet || activeTab?.sheetName || layoutAnalysis?.sheetName || '',
+      scenarioName: scenarioName || '',
+      scenarioId: selectedScenario || '',
+      headers: parsePreview?.headers || [],
+      tableMeta: parsePreview?.tableMeta || null,
+      rowCount: parsePreview?.rowCount ?? parsePreview?.rows?.length ?? 0,
+      sampleRow: parsePreview?.rows?.[0] || null,
+      layoutSummary: layoutAnalysis?.recommended?.description || '',
+    };
+  }, [
+    chatTables,
+    activeTableId,
+    snapshotId,
+    aiFile,
+    activeSheet,
+    layoutAnalysis,
+    scenarioName,
+    selectedScenario,
+    parsePreview,
+  ]);
+
+  const runConverse = useCallback(
+    async (text, { skipUserBubble = false, messagesOverride = null } = {}) => {
+      const userText = String(text || '').trim();
+      if (!userText) return;
+      if (!skipUserBubble) {
+        setChatMessages((prev) => [...prev, { role: 'user', content: userText }]);
+        setInputText('');
+      }
+      setAiLoading(true);
+      const sid =
+        activeTableId && !String(activeTableId).startsWith('draft-')
+          ? activeTableId
+          : snapshotId;
+      const activeSnap = sid && !String(sid).startsWith('draft-') ? parseInt(sid, 10) : null;
+      const msgs =
+        messagesOverride ||
+        [...chatMessages, { role: 'user', content: userText }].filter(
+          (m) => m.role === 'user' || m.role === 'assistant'
+        );
+      try {
+        const response = await fetch(`${API}/ai/converse`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: userText,
+            messages: msgs,
+            chatSessionId: chatSessionId || null,
+            projectId: projectId || null,
+            activeSnapshotId: Number.isFinite(activeSnap) ? activeSnap : null,
+            uiContext: buildUiContextForConverse(),
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || response.status);
+        if (data.assistantMessage) {
+          setChatMessages((prev) => [...prev, { role: 'assistant', content: data.assistantMessage }]);
+        }
+        if (data.tableOperation) {
+          const sid =
+            activeTableId && !String(activeTableId).startsWith('draft-')
+              ? activeTableId
+              : snapshotId;
+          if (data.headers) {
+            setParsePreview((prev) => ({
+              ...(prev || {}),
+              headers: data.headers,
+            }));
+          }
+          if (sid && !String(sid).startsWith('draft-')) {
+            await reloadSnapshotPage(sid, previewPage, {
+              highlightCols: Array.isArray(data.newColumns) ? data.newColumns : [],
+            });
+          }
+        }
+        if (data.reconcileClarification && data.questions?.length) {
+          setCurrentQuestion(data.questions[0]);
+        }
+        if (data.reconcileOperation && data.snapshotId) {
+          const label = data.title || `Сверка #${data.snapshotId}`;
+          await syncChatTablesAfterParse(data.snapshotId, label);
+          setSnapshotId(data.snapshotId);
+          setActiveTableId(data.snapshotId);
+          setWorkMode('result');
+          if (data.plan) setReconcilePlan(data.plan);
+          await reloadSnapshotPage(data.snapshotId, 1);
+        }
+      } catch (e) {
+        setChatMessages((prev) => [...prev, { role: 'assistant', content: `Сеть: ${e.message}` }]);
+      } finally {
+        setAiLoading(false);
+      }
+    },
+    [
+      chatMessages,
+      chatSessionId,
+      projectId,
+      activeTableId,
+      snapshotId,
+      previewPage,
+      reloadSnapshotPage,
+      buildUiContextForConverse,
+      syncChatTablesAfterParse,
+    ]
+  );
+
+  const wantsParseStart = (msg, scenId) => {
+    const t = String(msg || '').trim();
+    if (!hasParseBrief(t)) return false;
+    if (scenId) return true;
+    if (isInboxTableBrief(t)) return true;
+    if (
+      /спарс|вытащ|возьми\s+данн|данн[ыеа]\s+1f|таблиц.*1\.1|таблиц.*1\.2|прекращ|не\s+исполн|репо|номер\s+сделки/i.test(
+        t
+      ) &&
+      /1f\d{3}|брокер|депо/i.test(t)
+    ) {
+      return true;
+    }
+    return /разбер|парс|загруз|обработ|разлож|выгруз|depo|депо|брокер|ук\b|1f\d|начина|префикс|объедин|смерж|в\s+одну\s+таб|осв|карт|выгрузк|excel|xlsx|сч[её]т|58\.|76\.|01\b|созда(?:ть|й)\s+таблиц/i.test(
+      t
+    );
+  };
+
+  const wantsRuleRefine = (msg) =>
+    /правил|сценари|разверн|плоск|иерарх|(?:добавь|создай|сделай|надо\s+созда(?:ть|й)|нужно\s+созда(?:ть|й))\s+(?:колонк|столбц)|(?:убери|удали)\s+(?:колонк|столбц)|можешь\s+сделать\s+(?:новый\s+)?(?:колонк|столбц)|нов(?:ую|ый|ое)\s+(?:колонк|столбц).*?(?:после|перед|назов)/i.test(
+      String(msg || '')
+    );
+
+  const resolveTableCommandText = (raw, history) => {
+    const t = String(raw || '').trim();
+    if (!t || !/^колонк[ауеи]\s+\S/i.test(t)) return t;
+    const prevUser = [...(history || [])]
+      .reverse()
+      .find((m) => m.role === 'user' && String(m.content || '').trim());
+    if (!prevUser) return t;
+    const prev = String(prevUser.content).trim();
+    if (
+      isTableCommand(prev) ||
+      /(?:новую\s+)?(?:таблиц|вкладк)|(?:где|содержит|оставь|перенес)/i.test(prev)
+    ) {
+      return `${prev}. ${t}`;
+    }
+    return t;
+  };
+
   const sendChat = async (overrideText, scenarioId) => {
     const text = (overrideText ?? inputText).trim();
-    const hasFiles = stagedFiles.length > 0 || aiFile;
+    const effectiveText = resolveTableCommandText(text, chatMessages);
+    const pendingTableConfirm = resolvePendingTableConfirmation(text, chatMessages);
+    const tableActionMessage = pendingTableConfirm?.message || effectiveText;
+    const hasFiles = inboxReady;
+    const hasActiveTable = Boolean(
+      (snapshotId && !String(snapshotId).startsWith('draft-')) ||
+        (activeTableId && !String(activeTableId).startsWith('draft-')) ||
+        parsePreview?.headers?.length
+    );
 
     if (text && currentQuestion) {
-      const resolved = resolveQuestionAnswerFromText(text, currentQuestion);
+      let resolved = resolveQuestionAnswerFromText(text, currentQuestion);
+      if (resolved == null) {
+        try {
+          const resp = await fetch(`${API}/ai/resolve-answer`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userText: text,
+              question: currentQuestion,
+              layoutMeta: layoutAnalysis || null,
+            }),
+          });
+          const data = await resp.json();
+          if (data?.ok && data.resolved?.value) resolved = data.resolved.value;
+        } catch {
+          /* fallback below */
+        }
+      }
       if (resolved != null) {
         setChatMessages((prev) => [...prev, { role: 'user', content: text }]);
         setInputText('');
@@ -1121,7 +2112,7 @@ export default function AiMartin() {
       if (hasFiles) {
         setChatMessages((prev) => [...prev, { role: 'user', content: text }]);
         setInputText('');
-        await runBatchStart(stagedFiles.length ? stagedFiles : [aiFile], targetFile, {
+        await runInboxParse({
           userMessage: text,
           scenarioId: orchestratorAnswers?.scenarioId,
           nextAnswers: orchestratorAnswers,
@@ -1141,70 +2132,168 @@ export default function AiMartin() {
       }
     }
 
-    const tableCommandIntent =
-      /(вытащи|извлек|перенес|убер|удал|очист)/i.test(text) &&
-      /(колонк|инвентар|номер|дат)/i.test(text);
-    const filterLike =
-      /фильтр|оставь\s+(?:только|строк)|только\s+(?:строк|если|где|по)|убери\s+строк|удали\s+строк|исключи\s+строк/i.test(
-        text
-      ) ||
-      /(?:а|и)\s+ещ[её]|только\s+по\s+/i.test(text) ||
-      /\bname\s*=/i.test(text) ||
-      /debit[_\s]?account\s*=/i.test(text) ||
-      /credit[_\s]?account\s*=/i.test(text);
-    const classifyLike =
-      /(проанализ|классиф|определи|подумай|отправь\s+на\s+анализ|аренд|ремонт|движим|недвижим|имуществ)/i.test(text) &&
-      !tableCommandIntent &&
-      !filterLike;
-    const effectiveResultMode =
-      workMode === 'result' || tableCommandIntent || classifyLike || filterLike;
+    if (text && looksLikeReconcileIntent(text) && (projectId || chatSessionId)) {
+      setChatMessages((prev) => [...prev, { role: 'user', content: text }]);
+      setInputText('');
+      await runConverse(text, { skipUserBubble: true });
+      return;
+    }
 
-    if (!parsePreview && !effectiveResultMode) {
-      if (!hasFiles) {
-        alert('Сначала прикрепи файл, PDF или папку.');
+    const tableCmd =
+      !looksLikeReconcileIntent(text) &&
+      (isTableCommand(tableActionMessage) ||
+        Boolean(pendingTableConfirm) ||
+        looksLikeTableMutationIntent(text));
+    const tableQuery = hasActiveTable && isTableQuery(text);
+    const explicitReparse = /(?:спарс|разбер)\w*\s+(?:заново|снова|ещё\s*раз)|перепарс/i.test(text);
+    const tableWorkOnSnapshot =
+        hasActiveTable && (tableCmd || tableQuery || isTableCommand(text)) && !explicitReparse;
+    /** Файл выбран в 📎 — любая задача ≥3 символов стартует парс, не LLM-болтовню */
+    const scopedParseIntent =
+      !looksLikeReconcileIntent(text) &&
+      parseScope?.path &&
+      hasParseBrief(text) &&
+      !tableWorkOnSnapshot &&
+      !tableCmd &&
+      !tableQuery;
+
+    if (
+      hasFiles &&
+      !looksLikeReconcileIntent(text) &&
+      (wantsParseStart(text, scenarioId) || scopedParseIntent) &&
+      !tableWorkOnSnapshot
+    ) {
+      if (!parseScope?.path) {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: 'Выбери **папку или файл** через 📎, потом напиши задачу и Enter.',
+          },
+        ]);
         return;
       }
-      const files = stagedFiles.length ? stagedFiles : [aiFile];
-      if (text) {
-        setChatMessages((prev) => [...prev, { role: 'user', content: text }]);
-        setInputText('');
+      const sheetCount = sheetNames.length;
+      const parseAllSheets =
+        /все\s+лист|кажд\w+\s+лист|multi.?sheet|все\s+вкладк/i.test(text) ||
+        (sheetCount > 1 && /все\s+лист|кажд\w+\s+лист/i.test(text));
+      const cmdText = text;
+      setChatMessages((prev) => [...prev, { role: 'user', content: text }]);
+      setInputText('');
+      setAiLoading(true);
+      setLoadingHint('Строю план…');
+      try {
+        const scopedMetas = fileMetasFromParseScope(parseScope);
+        const { parsePlan: plan, reasoningTrace: planTrace } = await fetchPlanPreview(
+          cmdText,
+          scopedMetas,
+          scopedMetas.length ? null : stagedProbe
+        );
+        let nextAnswers = {
+          ...orchestratorAnswers,
+          ...(plan?.scenarioId ? { scenarioId: plan.scenarioId } : {}),
+          ...(plan?.filePrefix ? { filePrefix: plan.filePrefix } : {}),
+          ...(plan?.sheetName ? { sheetName: plan.sheetName } : {}),
+          ...(plan?.brokerSection ? { brokerSection: plan.brokerSection } : {}),
+        };
+        nextAnswers = stripOpifHintsForScopedFile(nextAnswers, parseScope);
+        const scopedScenarioId = resolveScenarioForScopedParse(
+          scenarioId || plan?.scenarioId || nextAnswers?.scenarioId,
+          parseScope
+        );
+        if (plan?.summary) {
+          setOrchestratorAnswers(nextAnswers);
+          setChatMessages((prev) => [
+            ...prev,
+            {
+              role: 'assistant',
+              content: `📋 План: **${plan.summary}**`,
+              reasoningTrace: planTrace || null,
+            },
+          ]);
+        }
+        await runInboxParse({
+          userMessage: cmdText,
+          pathScope: parseScope,
+          scenarioId: scopedScenarioId,
+          nextAnswers,
+          targetSheetName: activeSheet || plan?.sheetName || undefined,
+          filePrefix: scopedScenarioId === 'opif_broker' ? plan?.filePrefix || nextAnswers?.filePrefix : undefined,
+          parseAllSheets: plan?.parseAllSheets || parseAllSheets,
+        });
+      } catch (e) {
+        setChatMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: `Не смогла запустить парс: ${e.message}` },
+        ]);
+        setAiLoading(false);
+        setLoadingHint('');
       }
-      await runBatchStart(files, targetFile, {
-        userMessage: text || SCENARIO_PHRASES[scenarioId] || '',
-        scenarioId: scenarioId || orchestratorAnswers?.scenarioId,
-        nextAnswers: orchestratorAnswers,
-        targetSheetName: activeSheet || undefined,
-      });
+      return;
+    }
+
+    if (text && isEgrulIntent(text)) {
+      setChatMessages((prev) => [...prev, { role: 'user', content: text }]);
+      setInputText('');
+      await runEgrulFetch(text);
+      return;
+    }
+
+    if (text && hasActiveTable && tableQuery && !tableCmd) {
+      await runConverse(text);
+      return;
+    }
+
+    if (text && !tableCmd && (!hasActiveTable || !wantsRuleRefine(text))) {
+      await runConverse(text);
       return;
     }
 
     if (!text && !scenarioId) return;
-    if (!hasFiles) {
-      alert('Сначала прикрепи исходник Excel.');
+    if (!hasFiles && !hasActiveTable) {
+      await runConverse(text);
       return;
     }
 
-    if (effectiveResultMode && text) {
+    if (tableCmd && hasActiveTable && text) {
       setWorkMode('result');
       setChatMessages((prev) => [...prev, { role: 'user', content: text }]);
       setInputText('');
+      const tableActionText = tableActionMessage;
 
       let previewForAction = parsePreview;
       if (!previewForAction?.headers?.length) {
+        const sid =
+          activeTableId && !String(activeTableId).startsWith('draft-')
+            ? activeTableId
+            : snapshotId;
         setAiLoading(true);
         try {
-          const boot = await fetchBatchStart(
-            stagedFiles.length ? stagedFiles : [aiFile],
-            targetFile,
-            {
+          if (sid) {
+            const data = await reloadSnapshotPage(sid, previewPage);
+            if (data?.headers?.length) {
+              previewForAction = {
+                headers: data.headers,
+                rows: (data.rows || []).map(stripRowMeta),
+                rowCount: data.total ?? data.rows?.length ?? 0,
+              };
+            }
+          }
+          if (!previewForAction?.headers?.length && sid) {
+            throw new Error(
+              'Таблица в БД есть, но превью не загрузилось. Обнови вкладку или открой таблицу слева — повторный парс файла не нужен.'
+            );
+          }
+          if (!previewForAction?.headers?.length && hasFiles && !sid) {
+            const boot = await fetchInboxParse({
               userMessage: '',
               scenarioId: orchestratorAnswers?.scenarioId || 'os_01_hierarchy',
               nextAnswers: orchestratorAnswers,
               targetSheetName: activeSheet || undefined,
-            }
-          );
-          applySessionData(boot, activeSheet || undefined);
-          previewForAction = boot.parsePreview || null;
+            });
+            applySessionData(boot, activeSheet || undefined);
+            previewForAction = boot.parsePreview || null;
+          }
         } catch (e) {
           setChatMessages((prev) => [
             ...prev,
@@ -1237,7 +2326,7 @@ export default function AiMartin() {
         { role: 'assistant', content: '⏳ Обрабатываю команду по таблице результата…' },
       ]);
       try {
-        const actionData = await runResultTableAction(text, previewForAction, [
+        const actionData = await runResultTableAction(tableActionText, previewForAction, [
           ...chatMessages,
           { role: 'user', content: text },
         ]);
@@ -1272,6 +2361,131 @@ export default function AiMartin() {
               setAiLoading(false);
               return;
             }
+            if (actionData.command?.action === 'replace_values' && snapshotId) {
+              setChatMessages((prev) => [
+                ...prev,
+                { role: 'assistant', content: actionData.assistantMessage || 'Готово.' },
+              ]);
+              setAiLoading(false);
+              return;
+            }
+            if (actionData.command?.action === 'delete_column') {
+              const sid =
+                activeTableId && !String(activeTableId).startsWith('draft-')
+                  ? activeTableId
+                  : snapshotId;
+              if (sid) {
+                setPreviewPage(1);
+                await reloadSnapshotPage(sid, 1);
+                if (actionData.headers?.length) {
+                  setParsePreview((prev) => ({
+                    ...(prev || {}),
+                    headers: actionData.headers,
+                  }));
+                }
+              }
+              setChatMessages((prev) => [
+                ...prev,
+                { role: 'assistant', content: actionData.assistantMessage || 'Готово.' },
+              ]);
+              setAiLoading(false);
+              return;
+            }
+            if (actionData.command?.action === 'add_column') {
+              const sid =
+                activeTableId && !String(activeTableId).startsWith('draft-')
+                  ? activeTableId
+                  : snapshotId;
+              if (sid) {
+                const newCols = actionData.newColumns || [actionData.command?.newColumnName].filter(Boolean);
+                if (actionData.headers?.length) {
+                  setParsePreview((prev) => {
+                    const headers = actionData.headers;
+                    const newCol = newCols[0];
+                    const rows = (prev?.rows || []).map((r) => ({
+                      ...r,
+                      ...(newCol ? { [newCol]: r[newCol] ?? '' } : {}),
+                    }));
+                    return { ...(prev || {}), headers, rows, rowCount: prev?.rowCount };
+                  });
+                }
+                await reloadSnapshotPage(sid, previewPage, { highlightCols: newCols });
+              }
+              setChatMessages((prev) => [
+                ...prev,
+                { role: 'assistant', content: actionData.assistantMessage || 'Готово.' },
+              ]);
+              setAiLoading(false);
+              return;
+            }
+            if (actionData.command?.action === 'fill_column') {
+              const sid =
+                activeTableId && !String(activeTableId).startsWith('draft-')
+                  ? activeTableId
+                  : snapshotId;
+              if (sid) {
+                const highlight =
+                  actionData.command?.targetColumn || actionData.command?.newColumnName
+                    ? [actionData.command.targetColumn || actionData.command.newColumnName]
+                    : [];
+                await reloadSnapshotPage(sid, previewPage, { highlightCols: highlight });
+              }
+              setChatMessages((prev) => [
+                ...prev,
+                { role: 'assistant', content: actionData.assistantMessage || 'Готово.' },
+              ]);
+              setAiLoading(false);
+              return;
+            }
+            if (actionData.command?.action === 'split_to_table') {
+              if (actionData.newSnapshotId) {
+                const newSid = actionData.newSnapshotId;
+                const tabLabel =
+                  [actionData.tableLabel, actionData.rowCount]
+                    .filter((x) => x != null && x !== '')
+                    .join(' · ') ||
+                  actionData.tableLabel ||
+                  'выборка';
+                setChatTables((prev) => {
+                  if (prev.some((t) => t.snapshotId === newSid)) return prev;
+                  return [
+                    ...prev,
+                    {
+                      snapshotId: newSid,
+                      label: tabLabel,
+                      sheetName: actionData.tableLabel || 'выборка',
+                      rowCount: actionData.rowCount,
+                      sourceFileName: aiFile?.name || '',
+                    },
+                  ];
+                });
+                setActiveTableId(newSid);
+                setSnapshotId(newSid);
+                setPreviewPage(1);
+                await reloadSnapshotPage(newSid, 1);
+                if (chatSessionId) {
+                  const loaded = await fetch(`${API}/chats/${chatSessionId}`);
+                  const chatData = await loaded.json();
+                  if (loaded.ok && chatData.snapshots?.length) {
+                    setChatTables(chatData.snapshots);
+                  }
+                }
+                if (chatSessionId) await refreshChatSessions();
+              }
+              setChatMessages((prev) => [
+                ...prev,
+                {
+                  role: 'assistant',
+                  content:
+                    actionData.assistantMessage ||
+                    (actionData.newSnapshotId
+                      ? 'Готово.'
+                      : 'Не удалось создать вкладку — обнови страницу (F5) и проверь, что API на :3001 запущен.'),
+                },
+              ]);
+              setAiLoading(false);
+              return;
+            }
             if (actionData.command?.auditorRule) setEnrichAuditorRule(actionData.command.auditorRule);
             if (actionData.command?.sourceColumn) setEnrichSourceColumn(actionData.command.sourceColumn);
             if (actionData.command?.action === 'classify') setEnrichMode('classify');
@@ -1293,6 +2507,40 @@ export default function AiMartin() {
             setChatMessages((prev) => [
               ...prev,
               { role: 'assistant', content: actionData.assistantMessage || 'Фильтр применён.' },
+            ]);
+            setAiLoading(false);
+            return;
+          }
+          if (actionData.command?.action === 'split_to_table' && Array.isArray(actionData.filteredRows)) {
+            const previewNote =
+              basePreview?.rowCount &&
+              basePreview.rowCount > (actionData.filterStats?.before ?? basePreview?.rows?.length ?? 0)
+                ? `\n\n⚠️ Обработано только превью (${actionData.filterStats?.before ?? basePreview?.rows?.length ?? 0} из ${basePreview.rowCount}). Дождись полного парса в БД — тогда split сохранится во вкладку.`
+                : '';
+            setChatMessages((prev) => [
+              ...prev,
+              {
+                role: 'assistant',
+                content:
+                  (actionData.assistantMessage || 'Не удалось создать вкладку.') +
+                  previewNote +
+                  (actionData.needsSnapshot
+                    ? '\n\n⚠️ Таблица ещё не в БД — перезагрузи файл и дождись snapshot, потом повтори split.'
+                    : ''),
+              },
+            ]);
+            setAiLoading(false);
+            return;
+          }
+          if (actionData.needsSnapshot) {
+            setChatMessages((prev) => [
+              ...prev,
+              {
+                role: 'assistant',
+                content:
+                  actionData.assistantMessage ||
+                  'Команда требует snapshot в БД. Дождись полного парса или перезагрузи файл.',
+              },
             ]);
             setAiLoading(false);
             return;
@@ -1346,6 +2594,20 @@ export default function AiMartin() {
             setAiLoading(false);
             return;
           }
+        } else if (!actionData.handled && !isTableCommand(tableActionText)) {
+          setAiLoading(false);
+          await runConverse(text, { skipUserBubble: true });
+          return;
+        } else if (actionData.assistantMessage || actionData.fromSnapshot) {
+          setChatMessages((prev) => [
+            ...prev,
+            {
+              role: 'assistant',
+              content: actionData.assistantMessage || 'Не поняла команду для этой таблицы.',
+            },
+          ]);
+          setAiLoading(false);
+          return;
         }
       } catch (e) {
         setChatMessages((prev) => [
@@ -1437,17 +2699,7 @@ export default function AiMartin() {
         return;
       }
 
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          content:
-            'Режим результата. Примеры:\n' +
-            '• «Вытащи инвентарный номер и дату из колонки ОС»\n' +
-            '• «Убери из колонки ОС номер и дату» (очистить текст ячейки)\n' +
-            '• «удали колонку Группа» (убрать всю колонку)',
-        },
-      ]);
+      await runConverse(text, { skipUserBubble: true });
       return;
     }
 
@@ -1577,20 +2829,138 @@ export default function AiMartin() {
   );
 
   const runResultTableAction = async (message, previewOverride = null, chatContext = null) => {
-    const sid = snapshotId;
+    const resolveSnapshotId = () => {
+      const candidates = [activeTableId, snapshotId];
+      for (const c of candidates) {
+        if (c && !String(c).startsWith('draft-')) return c;
+      }
+      const activeTab =
+        chatTables.find((t) => t.snapshotId === activeTableId) ||
+        chatTables.find((t) => t.snapshotId === snapshotId);
+      if (activeTab?.snapshotId && !String(activeTab.snapshotId).startsWith('draft-')) {
+        return activeTab.snapshotId;
+      }
+      return null;
+    };
+
+    const materializePreviewSnapshot = async (preview) => {
+      if (!preview?.headers?.length || !preview?.rows?.length) return null;
+      const total = preview.rowCount ?? preview.rows.length;
+      const body = {
+        headers: preview.headers,
+        rows: preview.rows,
+        rowCount: total,
+        sourceFileName: aiFile?.name || 'preview',
+        sheetName: activeSheet || preview.sheetName || 'лист',
+        scenarioId: selectedScenario || orchestratorAnswers?.scenarioId || null,
+        projectId: projectId || undefined,
+        chatSessionId: chatSessionId || undefined,
+      };
+      const response = await fetch(`${API}/parse/snapshots/import-preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.snapshotId) return null;
+      const sid = data.snapshotId;
+      setSnapshotId(sid);
+      setActiveTableId(sid);
+      const tabLabel = [body.sourceFileName, body.sheetName, data.rowCount ?? total]
+        .filter((x) => x != null && x !== '')
+        .join(' · ');
+      setChatTables((prev) => {
+        const withoutDrafts = prev.filter((t) => !t.isDraft);
+        if (withoutDrafts.some((t) => t.snapshotId === sid)) return withoutDrafts;
+        return [
+          ...withoutDrafts,
+          {
+            snapshotId: sid,
+            label: tabLabel,
+            sheetName: body.sheetName,
+            rowCount: data.rowCount ?? total,
+            sourceFileName: body.sourceFileName,
+          },
+        ];
+      });
+      if (chatSessionId) syncChatTablesAfterParse(sid, tabLabel);
+      return sid;
+    };
+
+    let sid = resolveSnapshotId();
+    const previewForMaterialize = previewOverride || parsePreview;
+    const previewRowsCount = previewForMaterialize?.rows?.length || 0;
+    const totalRows = previewForMaterialize?.rowCount ?? previewRowsCount;
+    const needsDbImport =
+      !sid &&
+      totalRows > previewRowsCount &&
+      aiFile &&
+      (sourceKind === 'text_1c' || /\.(txt|csv|tsv)$/i.test(aiFile.name || ''));
+    if (needsDbImport) {
+      try {
+        const fd = new FormData();
+        fd.append('file', aiFile);
+        if (chatSessionId) fd.append('chatSessionId', String(chatSessionId));
+        if (projectId) fd.append('projectId', String(projectId));
+        const imp = await fetch(`${API}/parse/snapshots/import-text`, { method: 'POST', body: fd });
+        const impData = await imp.json().catch(() => ({}));
+        if (imp.ok && impData.snapshotId) {
+          sid = impData.snapshotId;
+          setSnapshotId(sid);
+          setActiveTableId(sid);
+          setParsePreview((prev) => ({
+            headers: impData.parsePreview?.headers || prev?.headers || [],
+            rows: impData.parsePreview?.rows || prev?.rows || [],
+            rowCount: impData.parsePreview?.rowCount ?? prev?.rowCount ?? totalRows,
+          }));
+          const tabLabel = [aiFile.name, impData.rowCount ?? totalRows]
+            .filter((x) => x != null && x !== '')
+            .join(' · ');
+          setChatTables((prev) => {
+            if (prev.some((t) => t.snapshotId === sid)) return prev;
+            return [
+              ...prev.filter((t) => !t.isDraft),
+              {
+                snapshotId: sid,
+                label: tabLabel,
+                sheetName: aiFile.name,
+                rowCount: impData.rowCount ?? totalRows,
+                sourceFileName: aiFile.name,
+              },
+            ];
+          });
+          if (chatSessionId) syncChatTablesAfterParse(sid, tabLabel);
+        }
+      } catch {
+        /* fallback to preview-only path */
+      }
+    }
+
+    if (
+      !sid &&
+      previewForMaterialize?.headers?.length &&
+      previewForMaterialize?.rows?.length &&
+      (previewRowsCount >= totalRows || /новую\s+таблиц|новая\s+таблиц|split_to_table|переименуй\s+колонк|удали\s+колонк/i.test(message))
+    ) {
+      sid = await materializePreviewSnapshot(previewForMaterialize);
+    }
+
     const recentMessages = (chatContext || chatMessages)
       .filter((m) => m?.role === 'user' || m?.role === 'assistant')
       .slice(-12)
       .map((m) => ({ role: m.role, content: m.content }));
+    const tableActionPayload = {
+      message,
+      messages: recentMessages,
+      chatSessionId: chatSessionId || undefined,
+    };
     if (sid) {
       const response = await fetch(`${API}/parse/snapshots/${sid}/apply-operation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message,
+          ...tableActionPayload,
           logChat: true,
-          chatSessionId: chatSessionId || undefined,
-          messages: recentMessages,
           options: {
             threshold: Number(enrichThreshold) || 0.7,
             auditorRule: enrichAuditorRule,
@@ -1600,15 +2970,50 @@ export default function AiMartin() {
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || `apply-operation ${response.status}`);
-      if (data.handled && data.headers) {
-        setParsePreview((prev) => ({
-          ...(prev || {}),
-          headers: data.headers,
-          rowCount: prev?.rowCount,
-        }));
-        await reloadSnapshotPage(sid, previewPage, {
-          highlightCols: data.newColumns || [],
-        });
+      if (data.handled && data.newSnapshotId) {
+        return {
+          ...data,
+          enriched: null,
+          fromSnapshot: true,
+        };
+      }
+      if (data.handled) {
+        if (data.headers) {
+          const newCols = data.newColumns || (data.command?.newColumnName ? [data.command.newColumnName] : []);
+          setParsePreview((prev) => {
+            const headers = data.headers;
+            const newCol = newCols[0];
+            const rows = (prev?.rows || []).map((r) => ({
+              ...r,
+              ...(newCol ? { [newCol]: r[newCol] ?? '' } : {}),
+            }));
+            return {
+              ...(prev || {}),
+              headers,
+              rows: newCol && prev?.rows?.length ? rows : prev?.rows,
+              rowCount: prev?.rowCount,
+            };
+          });
+        }
+        const mutating =
+          data.headers ||
+          data.command?.action === 'replace_values' ||
+          data.command?.action === 'filter_rows' ||
+          data.command?.action === 'delete_column' ||
+          data.command?.action === 'move_column' ||
+          data.command?.action === 'rename_column' ||
+          data.command?.action === 'add_column' ||
+          data.command?.action === 'duplicate_column' ||
+          data.command?.action === 'undo_last' ||
+          (data.affectedRows != null && data.affectedRows > 0);
+        if (mutating) {
+          const highlightCols =
+            data.newColumns ||
+            (data.command?.action === 'replace_values' && data.command?.column
+              ? [data.command.column]
+              : []);
+          await reloadSnapshotPage(sid, previewPage, { highlightCols });
+        }
       }
       return {
         ...data,
@@ -1623,7 +3028,7 @@ export default function AiMartin() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        message,
+        ...tableActionPayload,
         headers: preview.headers,
         rows,
         options: {
@@ -1636,6 +3041,13 @@ export default function AiMartin() {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || `result-table-action ${response.status}`);
+    if (data.needsSnapshot) {
+      return {
+        ...data,
+        handled: false,
+        fromSnapshot: false,
+      };
+    }
     return data;
   };
 
@@ -1742,6 +3154,8 @@ export default function AiMartin() {
     setParsePreview(session.parsePreview || null);
     setCompareResult(session.compareResult || null);
     setWarnings(session.warnings || []);
+    setValidationReport(session.validationReport || null);
+    setValidationDetailsOpen(false);
     setChatMessages(session.chatMessages || []);
     setPreviewPage(1);
   }, []);
@@ -1814,6 +3228,8 @@ export default function AiMartin() {
 
   const previewRows = parsePreview?.rows || [];
   const previewHeaders = parsePreview?.headers || [];
+  const tableLayoutLabel =
+    parsePreview?.tableMeta?.tableLayout === 'uk_osv_wide' ? 'ОСВ 58 wide' : null;
   const totalRows = snapshotId ? parsePreview?.rowCount || 0 : previewRows.length;
   const totalPreviewPages = Math.max(1, Math.ceil(totalRows / previewPageSize));
   const safePreviewPage = Math.min(previewPage, totalPreviewPages);
@@ -1877,6 +3293,10 @@ export default function AiMartin() {
 
   const displayScenario =
     scenarioName || scenarios.find((s) => s.id === selectedScenario)?.name || 'Авто';
+  const currentChat = useMemo(
+    () => chatSessions.find((c) => c.id === chatSessionId),
+    [chatSessions, chatSessionId]
+  );
   const confidencePct = routeConfidence != null ? Math.round(routeConfidence * 100) : null;
   const pageStart = totalRows ? (safePreviewPage - 1) * previewPageSize + 1 : 0;
   const pageEnd = Math.min(safePreviewPage * previewPageSize, totalRows);
@@ -1898,12 +3318,14 @@ export default function AiMartin() {
   };
 
   const renderMessage = (m, i) => {
+    const traceExtra = m.reasoningTrace ? <ReasoningTrace trace={m.reasoningTrace} /> : null;
     if (m.artifact) {
       return (
         <div key={i}>
           {renderChatBubble(
             'assistant',
-            `📊 **${m.artifact.label}** — ${Number(m.artifact.rowCount).toLocaleString('ru-RU')} строк${m.artifact.snapshotId ? ` (#${m.artifact.snapshotId})` : ''}. Таблица слева, вкладки сверху.`
+            `📊 **${m.artifact.label}** — ${Number(m.artifact.rowCount).toLocaleString('ru-RU')} строк${m.artifact.snapshotId ? ` (#${m.artifact.snapshotId})` : ''}. Таблица слева, вкладки сверху.`,
+            traceExtra
           )}
         </div>
       );
@@ -1914,12 +3336,77 @@ export default function AiMartin() {
         <div key={i}>
           {renderChatBubble(
             'assistant',
-            `✓ Фильтр: ${Number(kept).toLocaleString('ru-RU')}${total ? ` из ${Number(total).toLocaleString('ru-RU')}` : ''}`
+            `✓ Фильтр: ${Number(kept).toLocaleString('ru-RU')}${total ? ` из ${Number(total).toLocaleString('ru-RU')}` : ''}`,
+            traceExtra
           )}
         </div>
       );
     }
-    return <div key={i}>{renderChatBubble(m.role, m.content)}</div>;
+    return (
+      <div key={i}>{renderChatBubble(m.role, m.content, traceExtra)}</div>
+    );
+  };
+
+  const renderMergeStrategyCards = () => {
+    if (currentQuestion?.id !== 'pick_merge_strategy') return null;
+    const groups = currentQuestion.groups || structureGroups || [];
+    return (
+      <div className="mv2-merge-groups">
+        {groups.map((g, i) => (
+          <div key={g.key || i} className="mv2-merge-group-card">
+            <div className="mv2-merge-group-card__title">
+              Группа {i + 1}: {g.label || g.kind}
+            </div>
+            <div className="mv2-merge-group-card__meta">
+              {g.fileCount || 0} файл(ов)
+              {g.sampleNames?.length ? ` · ${g.sampleNames.slice(0, 2).join(', ')}` : ''}
+            </div>
+            {g.sampleHeaders?.length > 0 && (
+              <div className="mv2-merge-group-card__headers">
+                {g.sampleHeaders.slice(0, 4).join(' · ')}
+              </div>
+            )}
+          </div>
+        ))}
+        <div className="mv2-merge-actions">
+          {(currentQuestion.options || []).map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              className="mv2-merge-action-btn"
+              onClick={() => answerPendingQuestion('pick_merge_strategy', opt.value)}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const startAppendToTable = () => {
+    const sid =
+      activeTableId && !String(activeTableId).startsWith('draft-')
+        ? activeTableId
+        : snapshotId && !String(snapshotId).startsWith('draft-')
+          ? snapshotId
+          : null;
+    if (!sid) {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: 'Сначала открой таблицу с данными — потом добавим строки.' },
+      ]);
+      return;
+    }
+    setAppendTargetSnapshotId(sid);
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        role: 'assistant',
+        content:
+          'Режим **дозаписи**: выбери **один файл** в 📎 и напиши задачу (или Enter) — строки добавятся в текущую таблицу.',
+      },
+    ]);
   };
 
   const renderQuestionInChat = () => {
@@ -1961,13 +3448,53 @@ export default function AiMartin() {
           <span className="mv2-brand__sub">by BankFuture</span>
         </div>
         <div className="mv2-topbar__meta">
+          <span className="mv2-pill mv2-pill--chat" title="Текущий чат">
+            {currentChat?.title || 'Новый чат'}
+          </span>
           <span className="mv2-pill mv2-pill--scenario">Сценарий: {displayScenario}</span>
-          {parsePreview && snapshotId && (
-            <span className="mv2-pill mv2-pill--ready">Ready</span>
+          {tableLayoutLabel && (
+            <span className="mv2-pill mv2-pill--layout" title="Многоуровневая шапка как в Excel">
+              {tableLayoutLabel}
+            </span>
+          )}
+          {aiLoading ? (
+            <span className="mv2-pill mv2-pill--loading" title={loadingHint || 'Работаю'}>
+              {loadingHint || 'Работаю…'}
+            </span>
+          ) : inboxReady ? (
+            <span className="mv2-pill mv2-pill--staged">В хранилище · Enter</span>
+          ) : (
+            parsePreview &&
+            snapshotId && <span className="mv2-pill mv2-pill--ready">Ready</span>
           )}
           {confidencePct != null && (
             <span className="mv2-pill mv2-pill--confidence">Confidence: {confidencePct}%</span>
           )}
+          {validationReport && (
+            <button
+              type="button"
+              className={`mv2-pill mv2-pill--validation${validationReport.ok ? ' mv2-pill--validation-ok' : ' mv2-pill--validation-fail'}`}
+              onClick={() => setValidationDetailsOpen((v) => !v)}
+              title={validationReport.summary}
+            >
+              Валидация: {validationReport.ok ? 'ок' : 'отказ'}
+            </button>
+          )}
+          {sourceKind === 'pdf' && aiFile ? (
+            <button
+              type="button"
+              className="btn-link mv2-pill"
+              onClick={() => setPdfColumnEditorOpen(true)}
+            >
+              Настроить колонки
+            </button>
+          ) : null}
+          {sourceKind === 'pdf' && scenarioResolution ? (
+            <PdfScenarioBadge
+              scenarioResolution={scenarioResolution}
+              onOpenEditor={() => setPdfColumnEditorOpen(true)}
+            />
+          ) : null}
         </div>
         <div className="mv2-topbar__actions">
           <button type="button" className="mv2-icon-btn" title="История" onClick={() => setHistoryOpen(true)}>
@@ -1979,8 +3506,53 @@ export default function AiMartin() {
         </div>
       </header>
 
+      {pdfColumnEditorOpen && aiFile && sourceKind === 'pdf' ? (
+        <PdfColumnEditor
+          file={aiFile}
+          meta={{
+            projectId: projectId || null,
+            sectionId: scenarioResolution?.parseScenario?.signals?.sectionId || null,
+            docKind: scenarioResolution?.catalogScenarioId || 'unknown',
+            brokerSubtype: layoutAnalysis?.pdfProbe?.brokerSubtype || null,
+            scenarioName: scenarioResolution?.parseScenario?.scenarioName || '',
+          }}
+          onClose={() => setPdfColumnEditorOpen(false)}
+          onSaved={() => {
+            setPdfColumnEditorOpen(false);
+            setChatMessages((prev) => [
+              ...prev,
+              { role: 'assistant', content: 'Сценарий PDF сохранён. Загрузи файл снова — подхватится автоматически.' },
+            ]);
+          }}
+        />
+      ) : null}
+
       <div className="mv2-body" ref={bodyLayoutRef}>
+        <WorkspaceTree
+          api={API}
+          chatSessionId={chatSessionId}
+          refreshKey={inboxRefreshTick}
+          uploading={aiLoading && Boolean(uploadProgress)}
+          uploadProgress={uploadProgress}
+          onUploadPick={handleWorkspaceUpload}
+          onInboxChanged={(msg) => {
+            setInboxReady(false);
+            setInboxUploadCount(0);
+            setStagedProbe(null);
+            setParseScope(null);
+            setInboxStatus(msg || '');
+            setInboxRefreshTick((t) => t + 1);
+            if (msg) {
+              setChatMessages((prev) => [...prev, { role: 'assistant', content: msg }]);
+            }
+          }}
+        />
         <main className="mv2-table-pane">
+          {aiLoading && (
+            <div className="mv2-progress-strip" aria-hidden>
+              <div className="mv2-progress-strip__bar" />
+            </div>
+          )}
           <div className="mv2-tabs">
             {tableTabs.map((t) => {
               const active =
@@ -2013,6 +3585,53 @@ export default function AiMartin() {
           </div>
 
           <div className="mv2-table-toolbar">
+            {inboxStatus && <span className="mv2-inbox-status">{inboxStatus}</span>}
+            {appendTargetSnapshotId && (
+              <span className="mv2-append-badge" title="Дозапись в открытую таблицу">
+                + в таблицу #{appendTargetSnapshotId}
+              </span>
+            )}
+            {(snapshotId || activeTableId) &&
+              !String(snapshotId || activeTableId).startsWith('draft-') && (
+                <>
+                  <button
+                    type="button"
+                    className="mv2-export-btn"
+                    onClick={() => downloadSnapshotExport('csv')}
+                    disabled={aiLoading}
+                    title="Скачать CSV"
+                  >
+                    CSV
+                  </button>
+                  <button
+                    type="button"
+                    className="mv2-export-btn"
+                    onClick={() => downloadSnapshotExport('xlsx')}
+                    disabled={aiLoading}
+                    title="Скачать XLSX"
+                  >
+                    XLSX
+                  </button>
+                  <button
+                    type="button"
+                    className="mv2-export-btn mv2-export-btn--reconcile"
+                    onClick={openReconcilePanel}
+                    disabled={aiLoading || reconcileLoading}
+                    title="Сверить таблицы проекта"
+                  >
+                    Сверить
+                  </button>
+                  <button
+                    type="button"
+                    className="mv2-append-btn"
+                    onClick={startAppendToTable}
+                    disabled={aiLoading}
+                    title="Добавить файл в эту таблицу"
+                  >
+                    + Добавить файл
+                  </button>
+                </>
+              )}
             <label className="mv2-search">
               <span>🔍</span>
               <input
@@ -2028,40 +3647,154 @@ export default function AiMartin() {
             )}
           </div>
 
+          {validationReport && validationDetailsOpen && (
+            <div className={`mv2-validation-panel${validationReport.ok ? ' mv2-validation-panel--ok' : ' mv2-validation-panel--fail'}`}>
+              <div className="mv2-validation-panel__title">
+                {validationReport.ok ? 'Валидация пройдена' : 'Валидация не пройдена'}
+              </div>
+              <p className="mv2-validation-panel__summary">{validationReport.summary}</p>
+              <ul className="mv2-validation-panel__checks">
+                {(validationReport.checks || []).map((c) => (
+                  <li key={c.id} className={`mv2-validation-check mv2-validation-check--${c.status}`}>
+                    <strong>{c.title}</strong>
+                    <span className="mv2-validation-check__status">{c.status}</span>
+                    {c.status !== 'pass' && (
+                      <span className="mv2-validation-check__detail">
+                        ожидалось: {c.expected}
+                        {c.actual ? ` · получено: ${c.actual}` : ''}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {reconcilePanelOpen && (
+            <div className="mv2-reconcile-panel">
+              <div className="mv2-reconcile-panel__title">Сверка таблиц</div>
+              <div className="mv2-reconcile-panel__row">
+                <label>
+                  Слева
+                  <select
+                    value={reconcileLeftRef}
+                    onChange={(e) => setReconcileLeftRef(e.target.value)}
+                    disabled={reconcileLoading}
+                  >
+                    <option value="">— выбери —</option>
+                    {(reconcileCatalog || []).map((s) => (
+                      <option key={s.ref} value={s.ref}>
+                        {s.label}
+                        {s.needsParse ? ' (inbox)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Справа
+                  <select
+                    value={reconcileRightRef}
+                    onChange={(e) => setReconcileRightRef(e.target.value)}
+                    disabled={reconcileLoading}
+                  >
+                    <option value="">— выбери —</option>
+                    {(reconcileCatalog || []).map((s) => (
+                      <option key={s.ref} value={s.ref}>
+                        {s.label}
+                        {s.needsParse ? ' (inbox)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="mv2-reconcile-panel__actions">
+                <button
+                  type="button"
+                  className="mv2-export-btn"
+                  disabled={reconcileLoading || !reconcileLeftRef || !reconcileRightRef}
+                  onClick={async () => {
+                    const left = reconcileCatalog.find((s) => s.ref === reconcileLeftRef);
+                    const right = reconcileCatalog.find((s) => s.ref === reconcileRightRef);
+                    if (!left || !right) return;
+                    setReconcileLoading(true);
+                    try {
+                      const msg = `сверь ${left.label} с ${right.label}`;
+                      const data = await fetchReconcilePlan(msg);
+                      setReconcilePlan(data.plan);
+                    } catch (e) {
+                      setChatMessages((prev) => [
+                        ...prev,
+                        { role: 'assistant', content: `План сверки: ${e.message}` },
+                      ]);
+                    } finally {
+                      setReconcileLoading(false);
+                    }
+                  }}
+                >
+                  Составить план
+                </button>
+                <button
+                  type="button"
+                  className="mv2-export-btn mv2-export-btn--reconcile"
+                  disabled={reconcileLoading || !reconcilePlan}
+                  onClick={() => runReconcileExecute(reconcilePlan)}
+                >
+                  Запустить
+                </button>
+                <button
+                  type="button"
+                  className="mv2-export-btn"
+                  onClick={() => {
+                    setReconcilePanelOpen(false);
+                    setReconcilePlan(null);
+                  }}
+                >
+                  Закрыть
+                </button>
+              </div>
+              {reconcilePlan && (
+                <div className="mv2-reconcile-panel__plan">
+                  <div>
+                    <strong>{reconcilePlan.left?.label || reconcilePlan.left?.ref}</strong>
+                    {' ↔ '}
+                    <strong>{reconcilePlan.right?.label || reconcilePlan.right?.ref}</strong>
+                  </div>
+                  <div>
+                    Ключи: {(reconcilePlan.leftKeys || []).join(', ') || '—'} /{' '}
+                    {(reconcilePlan.rightKeys || []).join(', ') || '—'}
+                  </div>
+                  <div>
+                    Колонки:{' '}
+                    {(reconcilePlan.valuePairs || [])
+                      .map((p) => `${p.left}↔${p.right}`)
+                      .join(', ') || 'пересечение заголовков'}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <div ref={tableScrollRef} className="mv2-table-area table-container">
             {!parsePreview && (
               <div className="mv2-empty">
                 <span className="mv2-empty__icon">📊</span>
                 <p>
-                  {stagedFiles.length
-                    ? 'Файл прикреплён — напиши задачу в чате и нажми Отправить'
-                    : 'Прикрепи файл в чате — таблица появится здесь'}
+                  {inboxReady
+                    ? `В хранилище ${inboxUploadCount} файл(ов) — выбери что парсить в чате`
+                    : 'Прикрепи файл в чате — сначала уйдёт в хранилище на сервере'}
                 </p>
               </div>
             )}
             {parsePreview && (
               <>
                 {rowsLoading && <p className="hint" style={{ padding: '0.5rem' }}>Загружаю страницу…</p>}
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      {previewHeaders.map((h) => (
-                        <th key={h} className={highlightHeaders.includes(h) ? 'col-new' : undefined}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {searchedRows.map((row, ri) => (
-                      <tr key={ri}>
-                        {previewHeaders.map((h) => (
-                          <td key={h} className={highlightHeaders.includes(h) ? 'col-new' : undefined}>
-                            {row[h] ?? ''}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <ExcelGridTable
+                  headers={previewHeaders}
+                  rows={searchedRows}
+                  tableMeta={parsePreview?.tableMeta}
+                  highlightHeaders={highlightHeaders}
+                  rowOffset={(safePreviewPage - 1) * previewPageSize}
+                />
               </>
             )}
           </div>
@@ -2118,70 +3851,34 @@ export default function AiMartin() {
             {chatMessages.length === 0 && !aiLoading && !currentQuestion && (
               renderChatBubble(
                 'assistant',
-                'Привет! Прикрепи скрепкой Excel, PDF или папку — разберу и выложу таблицы слева. Дальше всё через чат: фильтр, колонки, классификация.'
+                'Привет! **Слева** — заливка в Хранилище. **📎** — выбери папку или файл. **Напиши задачу** в чате (правила, сценарий) — потом Enter.'
               )
             )}
             {chatMessages.map((m, i) => renderMessage(m, i))}
             {renderQuestionInChat()}
-            {aiLoading && (
-              <div className="mv2-typing">
-                <div className="mv2-avatar mv2-avatar--martin">M</div>
-                <span>{loadingHint || 'Думаю…'}</span>
-              </div>
-            )}
+            {renderMergeStrategyCards()}
+            {aiLoading && <MartinLoader hint={loadingHint || 'Думаю…'} />}
           </div>
 
           <div className="mv2-chat__footer">
-            {(stagedFiles.length > 0 || aiFile) && (
+            {parseScope?.path && (
               <div className="mv2-staging">
-                {(stagedFiles.length ? stagedFiles : aiFile ? [aiFile] : []).slice(0, 6).map((f) => (
-                  <span
-                    key={f.webkitRelativePath || f.name}
-                    className={`mv2-staging__chip${f.webkitRelativePath ? ' mv2-staging__chip--folder' : ''}`}
-                    title={f.webkitRelativePath || f.name}
-                  >
-                    {f.webkitRelativePath ? `📁 ${f.webkitRelativePath}` : `📄 ${f.name}`}
-                  </span>
-                ))}
-                {stagedFiles.length > 6 && (
-                  <span className="mv2-staging__chip">+{stagedFiles.length - 6} файлов</span>
+                <span className="mv2-staging__chip" title="Выбрано для парса">
+                  {parseScope.type === 'file' ? '📄' : '📁'} {parseScope.path}
+                </span>
+                {!aiLoading && (
+                  <span className="mv2-staging__hint">задача + Enter</span>
                 )}
+                <button
+                  type="button"
+                  className="mv2-staging__clear"
+                  onClick={() => setParseScope(null)}
+                  title="Сбросить выбор"
+                >
+                  ×
+                </button>
               </div>
             )}
-
-            <input
-              ref={chatFileInputRef}
-              type="file"
-              accept=".xls,.xlsx,.xlsm,.txt,.csv,.tsv,.pdf"
-              multiple
-              hidden
-              onChange={(e) => {
-                if (e.target.files?.length) handleFilesPick(e.target.files);
-                e.target.value = '';
-              }}
-            />
-            <input
-              ref={chatFolderInputRef}
-              type="file"
-              webkitdirectory=""
-              directory=""
-              multiple
-              hidden
-              onChange={(e) => {
-                if (e.target.files?.length) handleFolderPick(e.target.files);
-                e.target.value = '';
-              }}
-            />
-            <input
-              ref={chatTargetInputRef}
-              type="file"
-              accept=".xls,.xlsx,.xlsm"
-              hidden
-              onChange={(e) => {
-                handleTargetFilePick(e.target.files?.[0] || null);
-                e.target.value = '';
-              }}
-            />
 
             <div className="mv2-input-box">
               <textarea
@@ -2190,10 +3887,12 @@ export default function AiMartin() {
                   currentQuestion
                     ? 'Ответь Martin в чате…'
                     : parsePreview
-                      ? 'Фильтр, замени в колонке, классифицируй…'
-                      : stagedFiles.length > 0
-                        ? 'депо, брокер, ук… (Enter — отправить)'
-                        : 'Напиши задачу или прикрепи файл…'
+                      ? 'Спроси про таблицу, фильтр, или напиши что угодно…'
+                      : inboxReady
+                        ? parseScope?.path
+                          ? 'разбери ОС, брокер 1F018, депо…'
+                          : '📎 — выбери что парсить, потом напиши задачу'
+                        : 'Загрузи файлы слева в Хранилище…'
                 }
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
@@ -2208,43 +3907,25 @@ export default function AiMartin() {
                 <div className="mv2-input-toolbar__left" ref={attachMenuRef}>
                   <button
                     type="button"
-                    className="mv2-clip-btn"
-                    title="Прикрепить"
+                    className={`mv2-clip-btn${parseScope?.path ? ' mv2-clip-btn--active' : ''}`}
+                    title="Выбрать что парсить из хранилища"
                     disabled={aiLoading}
                     onClick={() => setAttachOpen((v) => !v)}
                   >
                     📎
                   </button>
                   {attachOpen && (
-                    <div className="mv2-attach-menu">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAttachOpen(false);
-                          chatFileInputRef.current?.click();
-                        }}
-                      >
-                        <span>📄</span> Файл или несколько
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAttachOpen(false);
-                          chatFolderInputRef.current?.click();
-                        }}
-                      >
-                        <span>📁</span> Папка целиком
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAttachOpen(false);
-                          chatTargetInputRef.current?.click();
-                        }}
-                      >
-                        <span>📑</span> Эталон Excel
-                      </button>
-                    </div>
+                    <InboxPicker
+                      api={API}
+                      chatSessionId={chatSessionId}
+                      refreshKey={inboxRefreshTick}
+                      parseScope={parseScope}
+                      onParseScopeChange={setParseScope}
+                      onParseSelected={() => runParseFromScope()}
+                      disabled={aiLoading}
+                      variant="attach"
+                      onClose={() => setAttachOpen(false)}
+                    />
                   )}
                 </div>
                 <button
@@ -2255,8 +3936,8 @@ export default function AiMartin() {
                   disabled={
                     aiLoading ||
                     (!inputText.trim() &&
-                      !aiFile &&
-                      !stagedFiles.length &&
+                      !parseScope?.path &&
+                      !inboxReady &&
                       !parsePreview &&
                       !currentQuestion &&
                       !needsScenarioChoice)

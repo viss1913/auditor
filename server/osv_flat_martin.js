@@ -152,7 +152,7 @@ async function importOsvFlatToSnapshot(pool, { file, sheetName, projectId, parse
     return {
         ok: true,
         snapshotId: sid,
-        parsePreview: { headers: parsed.headers, rows: parsed.rows.slice(0, 200), rowCount },
+        parsePreview: { ok: true, headers: parsed.headers, rows: parsed.rows.slice(0, 200), rowCount },
         warnings: [],
     };
 }

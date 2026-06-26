@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const { Pool } = require('pg');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -17,16 +16,31 @@ const { importFileToSnapshot } = require('./parse_snapshot_import');
 const { createParseSnapshotStore } = require('./parse_snapshot_store');
 const { createChatSessionStore } = require('./chat_session_store');
 const { applySnapshotOperation } = require('./parse_snapshot_operations');
+const { runEgrulCheck } = require('./egrul_martin');
+const { isEgrulIntent } = require('./egrul_intent');
 const { listParserProfiles, getParserProfile, resolveParserDispatch } = require('./parser_registry');
 const { loadTargetRows, comparePreviewToTarget } = require('./compare_target');
 const { applyTargetToRule, inferColumnsFromTargetHeaders } = require('./target_rule_infer');
 const { loadExample } = require('./ai_prompts');
 const { applyV2HintsFromUserMessage, bootstrapRuleFromUserMessage } = require('./rule_hints');
+const { bootstrapRuleWithLlm, shouldBootstrapWithLlm } = require('./rule_bootstrap_llm');
 const {
     buildTemplateMessage,
     generateMartinReply,
+    generateMartinConverseReply,
     buildLlmContext,
 } = require('./assist_martin');
+const {
+    buildProjectContextPack,
+    buildUiContextFallback,
+    mergeContextPacks,
+} = require('./martin_context_pack');
+const {
+    executeTableQuery,
+    formatQueryResultMessage,
+    formatQueryResultForLlm,
+} = require('./table_query_engine');
+const { planTableQuery } = require('./table_query_llm');
 const {
     applyScenario,
     resolveScenarioFromMessage,
@@ -42,10 +56,17 @@ const {
     applyExtractFields,
     stripExtractedFromText,
     defaultExtractFields,
+    inferExtractFieldsFromMessage,
+    stripTargetsFromFields,
     classifyBatchUnique,
 } = require('./cell_enrich');
-const { parseResultTableCommand } = require('./result_table_commands');
+const {
+    parseResultTableCommand,
+    formatColumnNotFoundMessage,
+    actionNeedsSourceColumn,
+} = require('./result_table_commands');
 const { mergeResultTableCommand } = require('./result_table_resolve');
+const { resolveTableCommand } = require('./result_table_resolve_command');
 const { planResultTableActionWithLlm } = require('./result_table_llm');
 
 const { buildSessionPlan, applyOrchestratorToLayoutMeta } = require('./orchestrator');
@@ -53,6 +74,8 @@ const { planTreeRuleWithLlm, isTreeIntentMessage } = require('./tree_rule_llm');
 const { detectSourceKind } = require('./file_dispatch');
 const { parse1cTsvExport } = require('./parse_1c_tsv');
 const { resolveUpload, shouldRequireTreeConfirm } = require('./scenario_router');
+const { parseUniversal } = require('./universal_parse/universal_parse_orchestrator');
+const { parseRequestedTableColumns } = require('./document_scan_llm');
 const { scenarioDisplayName } = require('./scenarios/catalog');
 const { checkUkParseSanity } = require('./uk_sanity');
 const {
@@ -66,21 +89,70 @@ const {
     fileNameOf,
     MAX_BATCH_FILES,
 } = require('./opif_martin');
-const { shouldParseAllSheets, parseAllExcelSheets } = require('./multi_sheet_martin');
+const {
+    buildParsePlan,
+    buildParsePlanAsync,
+    applyParsePlanToOrchestratorAnswers,
+} = require('./orchestrator/parse_plan');
+const { shouldParseAllSheets, parseAllExcelSheets, wantsMultiSheetExcelParse } = require('./multi_sheet_martin');
+const {
+    shouldUseStructureOrchestrator,
+    runExcelStructureAutostart,
+    buildStructureAutostartResponse,
+    buildStructureRefusalHttpBody,
+} = require('./structure_autostart');
 const { applyAutostartDefaults } = require('./autostart_defaults');
+const { isSmartDialogEnabled, shouldUseLlmReply } = require('./martin_flags');
+const { resolveAnswerFromText } = require('./orchestrator/answer_resolve');
+const { processAiChatWithTools, isToolsEnabled } = require('./martin_tools');
 const { PREVIEW_ROWS_CLIENT } = require('./parse_snapshot_import');
+const { safeResJson, safeResJsonAndLogChat, sanitizeParseApiBody } = require('./client_response_sanitize');
+const { buildReasoningTrace } = require('./reasoning_trace');
+const { ensureAuditorsSchema } = require('./auditor_schema');
+const {
+    auditorSlugFromRequest,
+    resolveAuditor,
+    listAuditors,
+} = require('./auditor_context');
+const { registerPdfParseScenarioRoutes } = require('./pdf_parse_scenario_api');
+const { registerInboxRoutes } = require('./project_inbox_api');
+const { registerReconcileRoutes } = require('./reconcile_api');
+const { bootstrapMartinSession } = require('./martin_workspace');
+const {
+    resolveBatchMergeContext,
+    runBatchWithMergeStrategy,
+    handleUniversalAppend,
+} = require('./batch_merge_runner');
+const { getPool } = require('./db_pool');
+const { ensureUsersSchema } = require('./user_schema');
+const {
+    assertProjectAccess,
+    assertSnapshotAccess,
+    assertChatAccess,
+    sendAccessError,
+    HttpError,
+} = require('./project_access');
 
-const pool = new Pool({
-    user: process.env.DB_USER,
-    host: process.env.DB_HOST,
-    database: process.env.DB_NAME,
-    password: process.env.DB_PASSWORD,
-    port: process.env.DB_PORT,
-});
+const pool = getPool();
 
 const upload = multer({ storage: multer.memoryStorage() });
 const snapshotStore = createParseSnapshotStore(pool);
 const chatSessionStore = createChatSessionStore(pool);
+
+ensureAuditorsSchema(pool).catch((err) => {
+    console.error('[auditors] schema init failed:', err.message);
+});
+ensureUsersSchema(pool).catch((err) => {
+    console.error('[users] schema init failed:', err.message);
+});
+
+function requireAuthUser(req, res) {
+    if (!req.user?.id) {
+        res.status(401).json({ error: 'Требуется вход' });
+        return null;
+    }
+    return req.user;
+}
 
 async function maybeLinkSnapshotToChat({ chatSessionId, snapshotId, label, projectId }) {
     if (!chatSessionId || !snapshotId) return;
@@ -99,7 +171,14 @@ async function maybeLinkSnapshotToChat({ chatSessionId, snapshotId, label, proje
     }
 }
 
-async function logChatExchange({ chatSessionId, projectId, snapshotId, userMessage, assistantMessage }) {
+async function logChatExchange({
+    chatSessionId,
+    projectId,
+    snapshotId,
+    userMessage,
+    assistantMessage,
+    toolCalls,
+}) {
     if (!chatSessionId) return;
     if (userMessage) {
         await chatSessionStore.appendChatMessage({
@@ -117,8 +196,22 @@ async function logChatExchange({ chatSessionId, projectId, snapshotId, userMessa
             snapshotId,
             role: 'assistant',
             content: assistantMessage,
+            toolCalls: toolCalls || null,
         });
     }
+}
+
+/** История чата для LLM: из body.messages или fallback из БД по chatSessionId. */
+async function resolveChatHistory(body = {}) {
+    let chatHistory = Array.isArray(body.messages) ? body.messages : [];
+    const chatSessionId = body.chatSessionId ? parseInt(body.chatSessionId, 10) : null;
+    if (chatSessionId && !chatHistory.length) {
+        chatHistory = await chatSessionStore.getChatMessages(chatSessionId, 20);
+    }
+    return chatHistory
+        .filter((m) => m?.role === 'user' || m?.role === 'assistant')
+        .slice(-12)
+        .map((m) => ({ role: m.role, content: String(m.content || '').slice(0, 2000) }));
 }
 
 async function importParseFromFile(file, rule, opts = {}) {
@@ -188,18 +281,44 @@ async function fetchSavedRulesByProject(projectId) {
 }
 
 function shouldUseLlmOnAutostart() {
-    return process.env.MARTIN_USE_LLM_AUTOSTART === '1';
+    return shouldUseLlmReply();
 }
 
-function buildText1cAutostartResponse(file, parsed, routed = {}) {
-    const previewLimit = 200;
-    const rows = parsed.rows.slice(0, previewLimit);
-    const scenarioId = routed.scenarioId || (parsed.profile === 'deals_registry_tsv' ? 'deals_registry_tsv' : 'card_90_tsv');
+async function buildText1cAutostartResponse(file, parsed, routed = {}, opts = {}) {
+    const previewRows = parsed.rows.slice(0, PREVIEW_ROWS_CLIENT);
+    const scenarioId =
+        routed.scenarioId ||
+        (parsed.profile === 'deals_registry_tsv' ? 'deals_registry_tsv' : 'card_90_tsv');
     const scenarioName = routed.scenarioName || scenarioDisplayName(scenarioId);
+    const sourceFileName = fileNameOf(file) || file?.originalname || 'export.txt';
+    const projectId = opts.projectId ? parseInt(opts.projectId, 10) : null;
+
+    let snapshotId = null;
+    try {
+        snapshotId = await snapshotStore.createSnapshot({
+            projectId: Number.isFinite(projectId) ? projectId : null,
+            sourceFileName,
+            sheetName: null,
+            scenarioId,
+            headers: parsed.headers,
+            status: 'parsing',
+        });
+        await snapshotStore.importParsedRows(snapshotId, parsed.headers, parsed.rows);
+        console.log(`[text1c] snapshot id=${snapshotId} rows=${parsed.rowCount}`);
+    } catch (err) {
+        console.error('[text1c] snapshot import failed', err.message);
+        snapshotId = null;
+    }
+
     const parts = [
         `Разобрала **текстовую выгрузку 1С** — сценарий **${scenarioName}**.`,
         `Строк: **${parsed.rowCount}**.`,
     ];
+    if (snapshotId) {
+        parts.push('Данные сохранены в БД — фильтры и вкладки работают по всем строкам.');
+    } else {
+        parts.push('⚠️ Не удалось сохранить в БД — доступно только превью.');
+    }
     if (parsed.meta?.encoding && parsed.meta.encoding !== 'utf8') {
         parts.push(`Кодировка: ${parsed.meta.encoding}.`);
     }
@@ -210,10 +329,10 @@ function buildText1cAutostartResponse(file, parsed, routed = {}) {
         sourceKind: 'text_1c',
         parserProfile: 'kseniya',
         rule: null,
-        snapshotId: null,
+        snapshotId,
         parsePreview: {
             headers: parsed.headers,
-            rows,
+            rows: previewRows,
             rowCount: parsed.rowCount,
         },
         compareResult: null,
@@ -227,7 +346,7 @@ function buildText1cAutostartResponse(file, parsed, routed = {}) {
                 layout_type: 'fixed_columns',
                 description: `Текстовая выгрузка 1С (${parsed.profile})`,
             },
-            previewText: rows
+            previewText: previewRows
                 .slice(0, 5)
                 .map((r) => `${r['Период'] || ''}\t${r['Контрагент'] || ''}\t${r['Сумма Кт'] ?? ''}`)
                 .join('\n'),
@@ -243,7 +362,7 @@ function buildText1cAutostartResponse(file, parsed, routed = {}) {
         pendingQuestions: [],
         currentQuestion: null,
         sessionState: { step: 'ready', profileId: 'kseniya_text' },
-        previewTruncated: parsed.rowCount > previewLimit,
+        previewTruncated: parsed.rowCount > PREVIEW_ROWS_CLIENT,
     };
 }
 
@@ -260,6 +379,674 @@ function computeRuleDiff(before, after) {
     const at = (after.columns || []).map((c) => c.target).join('|');
     if (bt !== at) changes.push('изменён набор columns');
     return { changes: changes.length ? changes : ['мелкие правки в правиле'] };
+}
+
+async function buildUniversalAutostartResponse(file, routed, { projectId, userMessage } = {}) {
+    const result = await parseUniversal({
+        pool,
+        file,
+        projectId,
+        userMessage: userMessage || '',
+    });
+    if (!result.ok && result.errors) {
+        return { ok: false, errors: result.errors };
+    }
+    if (result.delegateDepo) {
+        return { ok: false, delegateDepo: true, routed: result };
+    }
+    const scenarioId = result.scenarioId || routed.scenarioId;
+
+    if (result.multiSheet && Array.isArray(result.snapshots) && result.snapshots.length > 1) {
+        return {
+            ok: true,
+            multiSheet: true,
+            multiTable: Boolean(result.multiTable),
+            snapshots: result.snapshots,
+            sheetNames: result.sheetNames || result.snapshots.map((s) => s.sheetName).filter(Boolean),
+            snapshotId: result.snapshots[0]?.snapshotId || result.snapshotId,
+            parsePreview: result.snapshots[0]?.parsePreview || result.parsePreview,
+            compareResult: null,
+            assistantMessage: result.assistantMessage,
+            warnings: result.warnings || [],
+            layoutMeta: result.layoutMeta || routed.layoutMeta,
+            needsScenarioChoice: Boolean(result.needsScenarioChoice),
+            needsConfirm: Boolean(result.needsConfirm),
+            scenarioId,
+            scenarioName: result.scenarioName || scenarioDisplayName(scenarioId),
+            confidence: result.confidence ?? routed.confidence,
+            sourceKind: result.sourceKind || routed.sourceKind,
+            candidates: result.candidates || routed.candidates || [],
+            treeSample: [],
+            pendingQuestions: result.needsConfirm
+                ? [{ id: 'confirm_parse', text: 'Подтверди результат парсинга или уточни поля в чате.' }]
+                : [],
+            currentQuestion: result.needsConfirm ? { id: 'confirm_parse' } : null,
+            sessionState: {
+                step: result.needsConfirm ? 'confirm' : 'ready',
+                profileId: routed.profileId || 'pavel',
+                scenarioId,
+            },
+            meta: result.meta || null,
+            engine: result.engine,
+            scenarioResolution: result.scenarioResolution || null,
+            gridDiagnostics: result.gridDiagnostics || null,
+            validationReport: result.validationReport || null,
+        };
+    }
+
+    return {
+        ok: true,
+        rule: result.rule || null,
+        snapshotId: result.snapshotId || null,
+        parsePreview: result.parsePreview || null,
+        compareResult: null,
+        assistantMessage:
+            result.assistantMessage ||
+            `Разобрала **${result.parsePreview?.rowCount || 0}** строк (${scenarioDisplayName(scenarioId)}).`,
+        warnings: result.warnings || [],
+        layoutMeta: result.layoutMeta || routed.layoutMeta,
+        sheetNames: [],
+        sheetName: null,
+        needsScenarioChoice: Boolean(result.needsScenarioChoice),
+        needsConfirm: Boolean(result.needsConfirm),
+        scenarioId,
+        scenarioName: result.scenarioName || scenarioDisplayName(scenarioId),
+        confidence: result.confidence ?? routed.confidence,
+        sourceKind: result.sourceKind || routed.sourceKind,
+        candidates: result.candidates || routed.candidates || [],
+        treeSample: [],
+        pendingQuestions: result.needsConfirm
+            ? [{ id: 'confirm_parse', text: 'Подтверди результат парсинга или уточни поля в чате.' }]
+            : result.needsScenarioChoice
+              ? [{ id: 'pdf_kind_choice', text: 'Выбери тип PDF-документа.' }]
+              : [],
+        currentQuestion: result.needsConfirm
+            ? { id: 'confirm_parse' }
+            : result.needsScenarioChoice
+              ? { id: 'pdf_kind_choice' }
+              : null,
+        sessionState: {
+            step: result.needsConfirm ? 'confirm' : result.needsScenarioChoice ? 'pick_scenario' : 'ready',
+            profileId: routed.profileId || 'pavel',
+            scenarioId,
+        },
+        meta: result.meta || null,
+        engine: result.engine,
+        scenarioResolution: result.scenarioResolution || null,
+        gridDiagnostics: result.gridDiagnostics || null,
+        validationReport: result.validationReport || null,
+    };
+}
+
+async function respondUniversalPdfAutostart(res, { sourceFile, routed, projectId, userMessage, chatSessionId }) {
+    const session = await buildUniversalAutostartResponse(sourceFile, routed, {
+        projectId,
+        userMessage: userMessage || '',
+    });
+    if (!session.ok) {
+        if (session.delegateDepo) {
+            return res.status(422).json({
+                error: 'PDF ДЕПО: загрузите через раздел ОПИФ (Любовь) или напиши «депо» в задаче.',
+            });
+        }
+        return res.status(422).json({ error: (session.errors || ['Ошибка парсинга PDF']).join('; ') });
+    }
+
+    if (chatSessionId && session.snapshotId) {
+        if (session.multiSheet && Array.isArray(session.snapshots)) {
+            for (const snap of session.snapshots) {
+                if (!snap.snapshotId) continue;
+                await maybeLinkSnapshotToChat({
+                    chatSessionId,
+                    snapshotId: snap.snapshotId,
+                    projectId,
+                    label: snap.label || snap.sheetName || sourceFile.originalname,
+                });
+            }
+        } else {
+            await maybeLinkSnapshotToChat({
+                chatSessionId,
+                snapshotId: session.snapshotId,
+                projectId,
+                label: sourceFile.originalname,
+            });
+        }
+    }
+    if (chatSessionId && session.assistantMessage) {
+        await logChatExchange({
+            chatSessionId,
+            projectId,
+            snapshotId: session.snapshotId,
+            userMessage: userMessage || '(старт парса)',
+            assistantMessage: session.assistantMessage,
+        });
+    }
+
+    return res.json({
+        ok: true,
+        rule: session.rule,
+        snapshotId: session.snapshotId,
+        parsePreview: session.parsePreview,
+        assistantMessage: session.assistantMessage,
+        warnings: session.warnings,
+        layoutAnalysis: session.layoutMeta,
+        needsScenarioChoice: false,
+        needsConfirm: session.needsConfirm,
+        scenarioId: session.scenarioId,
+        scenarioName: session.scenarioName,
+        confidence: session.confidence,
+        sourceKind: session.sourceKind,
+        meta: session.meta,
+        pendingQuestions: session.pendingQuestions,
+        currentQuestion: session.currentQuestion,
+        sessionState: session.sessionState,
+        engine: session.engine,
+        userMessage,
+        multiSheet: session.multiSheet || false,
+        multiTable: session.multiTable || false,
+        snapshots: session.snapshots || null,
+        sheetNames: session.sheetNames || null,
+    });
+}
+
+async function applyStructureAutostartToBatch({
+    pool,
+    sourceFile,
+    targetFile,
+    sheetName,
+    projectId,
+    savedRules,
+    scenarioId,
+    orchestratorAnswers,
+    userMessage,
+    chatSessionId,
+    parsePlan,
+    res,
+}) {
+    if (
+        !shouldUseStructureOrchestrator({
+            fileName: sourceFile.originalname,
+            scenarioId,
+            orchestratorAnswers,
+        })
+    ) {
+        return null;
+    }
+
+    console.log('[batch-start] structure orchestrator', fileNameOf(sourceFile), sheetName || '(default sheet)');
+    const structureStarted = Date.now();
+    const parsed = await runExcelStructureAutostart({
+        pool,
+        file: sourceFile,
+        targetFile,
+        sheetName,
+        projectId,
+        savedRules,
+    });
+
+    if (parsed.ok) {
+        const body = buildStructureAutostartResponse(parsed, {
+            userMessage,
+            parsePlan,
+            fileName: fileNameOf(sourceFile),
+        });
+        if (chatSessionId && parsed.snapshotId) {
+            await maybeLinkSnapshotToChat({
+                chatSessionId,
+                snapshotId: parsed.snapshotId,
+                projectId,
+                label: [fileNameOf(sourceFile), parsed.sheetName, parsed.rowCount]
+                    .filter((x) => x != null && x !== '')
+                    .join(' · '),
+            });
+        }
+        const chatLogFn =
+            chatSessionId && body.assistantMessage
+                ? () =>
+                      logChatExchange({
+                          chatSessionId,
+                          projectId,
+                          snapshotId: parsed.snapshotId,
+                          userMessage: userMessage || '(старт парса)',
+                          assistantMessage: body.assistantMessage,
+                      })
+                : null;
+        console.log(
+            '[batch-start] structure ok',
+            parsed.structureId,
+            parsed.rowCount,
+            'rows',
+            `in ${Date.now() - structureStarted}ms`
+        );
+        safeResJsonAndLogChat(
+            res,
+            { ...body, userMessage, parsePlan: parsePlan || null, staged: false },
+            chatLogFn
+        );
+        return true;
+    }
+
+    if (parsed.refused || parsed.skipped) {
+        const status = parsed.refused ? 422 : 422;
+        res.status(status).json(
+            buildStructureRefusalHttpBody(parsed, {
+                parsePlan,
+                fileName: fileNameOf(sourceFile),
+            })
+        );
+        return true;
+    }
+
+    res.status(422).json({
+        ok: false,
+        error: parsed.assistantMessage || `Не удалось разобрать лист: ${parsed.reason}`,
+        triedProfiles: parsed.triedProfiles,
+    });
+    return true;
+}
+
+async function parseMultipleExcelWorkbooksFromBatch({
+    pool,
+    files,
+    targetFile,
+    projectId,
+    savedRules,
+    userMessage,
+    chatSessionId,
+    parsePlan,
+    res,
+}) {
+    const excelFiles = (files || []).filter(
+        (f) => detectSourceKind(fileNameOf(f)) === 'excel' && f.buffer
+    );
+    if (!excelFiles.length) {
+        return res.status(422).json({
+            error: 'В выборе нет Excel для разбора. Уточни файл/папку или напиши «депо»/«брокер» для PDF/OPIF.',
+        });
+    }
+
+    const parsed = [];
+    const skipped = [];
+    for (const file of excelFiles) {
+        const structureStarted = Date.now();
+        const result = await runExcelStructureAutostart({
+            pool,
+            file,
+            targetFile,
+            sheetName: null,
+            projectId,
+            savedRules,
+        });
+        if (result?.ok) {
+            parsed.push({ file, result });
+            if (chatSessionId && result.snapshotId) {
+                await maybeLinkSnapshotToChat({
+                    chatSessionId,
+                    snapshotId: result.snapshotId,
+                    projectId,
+                    label: [fileNameOf(file), result.sheetName, result.rowCount]
+                        .filter((x) => x != null && x !== '')
+                        .join(' · '),
+                });
+            }
+            console.log(
+                '[batch-start] multi-workbook ok',
+                fileNameOf(file),
+                result.rowCount,
+                'rows',
+                `in ${Date.now() - structureStarted}ms`
+            );
+        } else {
+            skipped.push({
+                fileName: fileNameOf(file),
+                reason: result?.assistantMessage || result?.reason || 'unknown_structure',
+            });
+        }
+    }
+
+    if (!parsed.length) {
+        return res.status(422).json({
+            error: `Не разобрала ни один Excel из ${excelFiles.length} в выборе.`,
+            skipped,
+        });
+    }
+
+    const snapshots = parsed.map(({ file, result }) => ({
+        snapshotId: result.snapshotId,
+        sheetName: result.sheetName,
+        label: `${fileNameOf(file)} · ${result.rowCount}`,
+        rowCount: result.rowCount,
+        scenarioId: result.scenarioId,
+        scenarioName: result.scenarioName || scenarioDisplayName(result.scenarioId),
+        validationReport: result.validationReport || null,
+    }));
+
+    const primary = parsed[0].result;
+    const assistantMessage = [
+        `Разобрала **${parsed.length}** из **${excelFiles.length}** Excel в выборке.`,
+        skipped.length
+            ? `Пропустила: ${skipped.map((s) => `${s.fileName} (${s.reason})`).join('; ')}.`
+            : '',
+        parsePlan?.summary ? `\n📋 План: ${parsePlan.summary}` : '',
+    ]
+        .filter(Boolean)
+        .join('\n');
+
+    if (chatSessionId) {
+        await logChatExchange({
+            chatSessionId,
+            projectId,
+            snapshotId: primary.snapshotId,
+            userMessage,
+            assistantMessage,
+        });
+    }
+
+    return safeResJson(res, {
+        ok: true,
+        multiSheet: true,
+        snapshots,
+        sheetNames: parsed.map(({ result }) => result.sheetName).filter(Boolean),
+        snapshotId: primary.snapshotId,
+        parsePreview: primary.parsePreview,
+        scenarioId: primary.scenarioId,
+        scenarioName: primary.scenarioName || scenarioDisplayName(primary.scenarioId),
+        rule: primary.rule,
+        layoutAnalysis: primary.layoutMeta,
+        structureId: primary.structureId,
+        structure: primary.structure,
+        validationReport: primary.validationReport || null,
+        warnings: skipped.map((s) => `${s.fileName}: ${s.reason}`),
+        assistantMessage,
+        skippedWorkbooks: skipped,
+        needsUserInput: false,
+        needsScenarioChoice: false,
+        previewIsTentative: false,
+        userMessage,
+        parsePlan: parsePlan || null,
+        staged: false,
+        fromInbox: true,
+    });
+}
+
+function isPdfLikeFile(file) {
+    const kind = detectSourceKind(fileNameOf(file));
+    return kind === 'pdf' || kind === 'image_scan';
+}
+
+/** @deprecated use isPdfLikeFile */
+function isScanLikeFile(file) {
+    return isPdfLikeFile(file);
+}
+
+async function parseMultiplePdfDocumentsFromBatch({
+    pool,
+    files,
+    projectId,
+    userMessage,
+    chatSessionId,
+    parsePlan,
+    res,
+}) {
+    const pdfFiles = (files || []).filter((f) => isPdfLikeFile(f) && f.buffer);
+    if (!pdfFiles.length) {
+        return res.status(422).json({
+            error: 'В выборе нет PDF для разбора.',
+        });
+    }
+
+    const requestedHeaders = parseRequestedTableColumns(userMessage);
+    const allSnapshots = [];
+    const allRows = [];
+    const skipped = [];
+    let headers = requestedHeaders.length > 0 ? [...requestedHeaders] : [];
+    let primaryScenarioId = 'pdf_extracted';
+    let anyMultiSheet = false;
+
+    for (let i = 0; i < pdfFiles.length; i++) {
+        const file = pdfFiles[i];
+        const name = fileNameOf(file);
+        try {
+            const result = await parseUniversal({
+                pool,
+                file,
+                projectId,
+                userMessage,
+            });
+            if (result.scenarioId) primaryScenarioId = result.scenarioId;
+
+            if (result.multiSheet && Array.isArray(result.snapshots) && result.snapshots.length) {
+                anyMultiSheet = true;
+                for (const snap of result.snapshots) {
+                    const sectionLabel = snap.sheetName || snap.label || 'таблица';
+                    const entry = {
+                        snapshotId: snap.snapshotId,
+                        sheetName: `${name} — ${sectionLabel}`,
+                        label: `${name} · ${sectionLabel} · ${snap.rowCount}`,
+                        rowCount: snap.rowCount,
+                        scenarioId: snap.scenarioId || result.scenarioId,
+                        scenarioName:
+                            snap.scenarioName ||
+                            scenarioDisplayName(snap.scenarioId || result.scenarioId),
+                        parsePreview: snap.parsePreview,
+                        sectionId: snap.sectionId,
+                    };
+                    allSnapshots.push(entry);
+                    if (chatSessionId && snap.snapshotId) {
+                        await maybeLinkSnapshotToChat({
+                            chatSessionId,
+                            snapshotId: snap.snapshotId,
+                            projectId,
+                            label: entry.label,
+                        });
+                    }
+                }
+                continue;
+            }
+
+            const previewRows = result.parsePreview?.rows || [];
+            const rowCount =
+                result.parsePreview?.rowCount ?? previewRows.length ?? 0;
+
+            if (result.snapshotId && rowCount > 0) {
+                if (primaryScenarioId === 'broker_pdf') {
+                    allSnapshots.push({
+                        snapshotId: result.snapshotId,
+                        sheetName: name,
+                        label: `${name} · ${rowCount}`,
+                        rowCount,
+                        scenarioId: result.scenarioId,
+                        scenarioName:
+                            result.scenarioName || scenarioDisplayName(result.scenarioId),
+                        parsePreview: result.parsePreview,
+                    });
+                    if (chatSessionId) {
+                        await maybeLinkSnapshotToChat({
+                            chatSessionId,
+                            snapshotId: result.snapshotId,
+                            projectId,
+                            label: `${name} · ${rowCount}`,
+                        });
+                    }
+                    continue;
+                }
+
+                for (let j = 0; j < previewRows.length; j++) {
+                    const row = { ...previewRows[j] };
+                    const onlyUserCols =
+                        requestedHeaders.length > 0 &&
+                        (result.scenarioId === 'document_scan' ||
+                            primaryScenarioId === 'document_scan');
+                    if (!onlyUserCols) {
+                        row.source_file = previewRows[j].source_file || name;
+                        row['№'] = previewRows[j]['№'] || String(allRows.length + 1);
+                    }
+                    allRows.push(row);
+                }
+                if (!headers.length && result.parsePreview.headers?.length) {
+                    headers = [...result.parsePreview.headers];
+                    if (
+                        !headers.includes('source_file') &&
+                        !(requestedHeaders.length > 0 && result.scenarioId === 'document_scan')
+                    ) {
+                        headers.push('source_file');
+                    }
+                }
+            } else {
+                skipped.push({
+                    fileName: name,
+                    reason: result.assistantMessage || (result.errors || ['нет строк']).join('; '),
+                });
+            }
+        } catch (err) {
+            skipped.push({ fileName: name, reason: err.message });
+        }
+    }
+
+    const useSnapshotTabs =
+        primaryScenarioId === 'broker_pdf' ||
+        (primaryScenarioId !== 'document_scan' && anyMultiSheet) ||
+        (primaryScenarioId !== 'document_scan' && allSnapshots.length > 1);
+
+    if (useSnapshotTabs && allSnapshots.length) {
+        const primary = allSnapshots[0];
+        const labelPrefix =
+            primaryScenarioId === 'broker_pdf'
+                ? 'Брокер PDF'
+                : primaryScenarioId === 'document_scan'
+                  ? 'Сканы'
+                  : 'PDF';
+
+        const assistantMessage = [
+            `${labelPrefix}: **${allSnapshots.length}** таблиц из **${pdfFiles.length}** файл(ов).`,
+            skipped.length
+                ? `Пропустила: ${skipped.map((s) => `${s.fileName} (${s.reason})`).join('; ')}.`
+                : '',
+            parsePlan?.summary ? `\n📋 План: ${parsePlan.summary}` : '',
+        ]
+            .filter(Boolean)
+            .join('\n');
+
+        if (chatSessionId) {
+            await logChatExchange({
+                chatSessionId,
+                projectId,
+                snapshotId: primary.snapshotId,
+                userMessage,
+                assistantMessage,
+            });
+        }
+
+        return safeResJson(res, {
+            ok: true,
+            multiSheet: true,
+            multiTable: primaryScenarioId === 'broker_pdf',
+            snapshots: allSnapshots,
+            sheetNames: allSnapshots.map((s) => s.sheetName).filter(Boolean),
+            snapshotId: primary.snapshotId,
+            parsePreview: primary.parsePreview,
+            scenarioId: primaryScenarioId,
+            scenarioName: scenarioDisplayName(primaryScenarioId),
+            sourceKind: 'pdf',
+            engine: primaryScenarioId === 'broker_pdf' ? 'pdf_broker_sections' : 'pdf_universal',
+            needsConfirm: skipped.length > 0,
+            warnings: skipped.map((s) => `${s.fileName}: ${s.reason}`),
+            assistantMessage,
+            skippedPdfs: skipped,
+            userMessage,
+            parsePlan: parsePlan || null,
+            staged: false,
+            fromInbox: true,
+        });
+    }
+
+    if (!allRows.length) {
+        return res.status(422).json({
+            error: `Не разобрала ни один PDF из ${pdfFiles.length}.`,
+            skipped,
+        });
+    }
+
+    if (!headers.length) {
+        headers = [...new Set(allRows.flatMap((r) => Object.keys(r)))];
+    }
+    for (const h of headers) {
+        for (const row of allRows) {
+            if (row[h] == null) row[h] = '';
+        }
+    }
+
+    const snapshotId = await snapshotStore.createSnapshot({
+        projectId: projectId ? parseInt(projectId, 10) : null,
+        sourceFileName: `pdf_${pdfFiles.length}files`,
+        sheetName: null,
+        scenarioId: primaryScenarioId,
+        headers,
+        status: 'parsing',
+    });
+    const rowCount = await snapshotStore.importParsedRows(snapshotId, headers, allRows);
+
+    const labelPrefix =
+        primaryScenarioId === 'broker_pdf'
+            ? 'Брокер PDF'
+            : primaryScenarioId === 'document_scan'
+              ? 'Сканы'
+              : 'PDF';
+
+    const assistantMessage = [
+        `${labelPrefix}: **${allRows.length}** строк из **${pdfFiles.length}** файл(ов).`,
+        skipped.length
+            ? `Пропустила: ${skipped.map((s) => `${s.fileName} (${s.reason})`).join('; ')}.`
+            : '',
+        requestedHeaders.length
+            ? `Колонки: ${requestedHeaders.join(', ')}.`
+            : '',
+        parsePlan?.summary ? `\n📋 План: ${parsePlan.summary}` : '',
+    ]
+        .filter(Boolean)
+        .join('\n');
+
+    if (chatSessionId) {
+        await maybeLinkSnapshotToChat({
+            chatSessionId,
+            snapshotId,
+            projectId,
+            label: `${labelPrefix} · ${rowCount}`,
+        });
+        await logChatExchange({
+            chatSessionId,
+            projectId,
+            snapshotId,
+            userMessage,
+            assistantMessage,
+        });
+    }
+
+    return safeResJson(res, {
+        ok: true,
+        snapshotId,
+        parsePreview: {
+            headers,
+            rows: allRows.slice(0, PREVIEW_ROWS_CLIENT),
+            rowCount,
+        },
+        scenarioId: primaryScenarioId,
+        scenarioName: scenarioDisplayName(primaryScenarioId),
+        sourceKind: 'pdf',
+        engine: primaryScenarioId === 'document_scan' ? 'document_scan_llm' : 'pdf_universal',
+        needsConfirm: skipped.length > 0 || rowCount < pdfFiles.length,
+        warnings: skipped.map((s) => `${s.fileName}: ${s.reason}`),
+        assistantMessage,
+        skippedPdfs: skipped,
+        userMessage,
+        parsePlan: parsePlan || null,
+        staged: false,
+        fromInbox: true,
+    });
+}
+
+async function parseMultipleScanDocumentsFromBatch(ctx) {
+    return parseMultiplePdfDocumentsFromBatch(ctx);
 }
 
 async function runMartinSession({
@@ -279,7 +1066,7 @@ async function runMartinSession({
     let layoutMetaLocal = layoutMeta || null;
     let routed = routerResult;
     if (file && !routed) {
-        routed = resolveUpload({
+        routed = await resolveUpload({
             buffer: file.buffer,
             fileName: file.originalname,
             sheetName: layoutMetaLocal?.sheetName,
@@ -336,8 +1123,12 @@ async function runMartinSession({
         routed?.needsTreeConfirm ??
         shouldRequireTreeConfirm(layoutMetaLocal, routedScenario || 'os_01_flat', orchestratorAnswers);
 
-    // Autostart: на первом проходе — сразу полный парс, без черновика и вопросов
-    if ((plan.needsUserInput || mustConfirmTree) && !isFirstPass) {
+    const smartDialog = isSmartDialogEnabled();
+    const deferParseForQuestions =
+        (plan.needsUserInput || mustConfirmTree) && (!isFirstPass || smartDialog);
+
+    // Smart dialog: на первом проходе — черновик + вопрос, без commit в БД
+    if (deferParseForQuestions) {
         const q = plan.currentQuestion;
         const isPickScenario = q?.id === 'pick_scenario';
         const isPickTree = q?.id === 'pick_tree_flatten' || mustConfirmTree;
@@ -439,7 +1230,7 @@ async function runMartinSession({
               ? `${effectiveQuestion?.promptTemplate || ''}\n\nПоказала **черновик** таблицы. Нажми «Да, развернуть так» — тогда полный парс в БД.`
               : effectiveQuestion?.promptTemplate;
 
-        const assistantMessage = shouldUseLlmOnAutostart()
+        const assistantMessage = shouldUseLlmReply()
             ? await generateMartinReply({
                   messages: messages || [],
                   context: buildLlmContext({
@@ -451,6 +1242,7 @@ async function runMartinSession({
                       scenarioId: previewScenario,
                       needsScenarioChoice: isPickScenario,
                       awaitingTreeConfirm: isPickTree,
+                      pendingQuestion: effectiveQuestion,
                   }),
                   fallbackMessage,
               })
@@ -573,6 +1365,18 @@ async function runMartinSession({
     }
 
     let validated = validateRuleV2(rule);
+    if (!validated.ok && userMessage && shouldBootstrapWithLlm(layoutMetaLocal, userMessage, true)) {
+        const llmRule = await bootstrapRuleWithLlm({
+            layoutMeta: layoutMetaLocal,
+            userMessage,
+            baseRule: rule,
+        });
+        if (llmRule.ok) {
+            rule = llmRule.rule;
+            if (targetUsed) rule = applyTargetToRule(rule, target, columnCatalog);
+            validated = validateRuleV2(rule);
+        }
+    }
     if (!validated.ok && userMessage) {
         rule = bootstrapRuleFromUserMessage(userMessage, layoutMetaLocal);
         if (targetUsed) rule = applyTargetToRule(rule, target, columnCatalog);
@@ -718,7 +1522,18 @@ async function processAiChat({
         return { status: 400, body: { error: 'Нужен хотя бы один message в истории' } };
     }
     if (!file) {
-        return { status: 400, body: { error: 'Нужен Excel-файл' } };
+        return { status: 400, body: { error: 'Нужен файл' } };
+    }
+
+    const sourceKind = detectSourceKind(file.originalname || file.name || '');
+    if (sourceKind !== 'excel') {
+        return {
+            status: 400,
+            body: {
+                error:
+                    'PDF и сканы парсятся из **хранилища**: выбери файл через 📎 слева и напиши задачу (например «создай таблицу: …»).',
+            },
+        };
     }
 
     let excelMeta = null;
@@ -731,6 +1546,38 @@ async function processAiChat({
     const lastUser = [...messages].reverse().find((m) => m.role === 'user');
     let savedRules = [];
     if (projectId) savedRules = await fetchSavedRulesByProject(projectId);
+
+    let toolExchange = null;
+    if (isToolsEnabled()) {
+        try {
+            toolExchange = await processAiChatWithTools({
+                messages,
+                context: {
+                    scenarioId,
+                    orchestratorAnswers: orchestratorAnswers || {},
+                    layoutMeta: layoutAnalysis,
+                    currentQuestion: orchestratorAnswers?.currentQuestion || null,
+                    parsePreview: orchestratorAnswers?.parsePreview || null,
+                    targetBuffer: targetFile?.buffer || null,
+                },
+                maxSteps: 2,
+            });
+            if (toolExchange?.context?.orchestratorAnswers) {
+                orchestratorAnswers = {
+                    ...(orchestratorAnswers || {}),
+                    ...toolExchange.context.orchestratorAnswers,
+                };
+            }
+            if (toolExchange?.context?.filePrefix) {
+                orchestratorAnswers = {
+                    ...orchestratorAnswers,
+                    filePrefix: toolExchange.context.filePrefix,
+                };
+            }
+        } catch (err) {
+            console.warn('martin_tools:', err.message);
+        }
+    }
 
     const sheetForSession = sheetName || layoutAnalysis?.sheetName || excelMeta?.sheetName;
     let layoutForSession = layoutAnalysis;
@@ -775,12 +1622,18 @@ async function processAiChat({
             projectId,
         });
     }
+    const finalAssistantMessage =
+        toolExchange?.assistantMessage && toolExchange.toolResults?.length
+            ? `${toolExchange.assistantMessage}\n\n${session.assistantMessage || ''}`.trim()
+            : session.assistantMessage;
+
     await logChatExchange({
         chatSessionId: parsedChatSessionId,
         projectId,
         snapshotId: session.snapshotId || null,
         userMessage: lastUser?.content || '',
-        assistantMessage: session.assistantMessage,
+        assistantMessage: finalAssistantMessage,
+        toolCalls: toolExchange?.toolResults || null,
     });
 
     return {
@@ -790,7 +1643,8 @@ async function processAiChat({
             ruleSchemaVersion: 2,
             ruleDiff: session.ruleDiff,
             warnings: session.warnings,
-            assistantMessage: session.assistantMessage,
+            assistantMessage: finalAssistantMessage,
+            toolResults: toolExchange?.toolResults || null,
             parsePreview: session.parsePreview,
             snapshotId: session.snapshotId || null,
             compareResult: session.compareResult,
@@ -814,11 +1668,90 @@ async function processAiChat({
     };
 }
 
-// --- Проекты ---
+// --- Аудиторы и проекты (области изолированы по slug, auth позже) ---
+
+router.get('/auditors', async (req, res) => {
+    try {
+        res.json({ ok: true, auditors: await listAuditors(pool) });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.get('/martin/bootstrap', async (req, res) => {
+    try {
+        const user = requireAuthUser(req, res);
+        if (!user) return;
+        const createChat = req.query.createChat !== '0';
+        const session = await bootstrapMartinSession(pool, { userId: user.id, createChat });
+        res.json({ ok: true, ...session });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/martin/chats', async (req, res) => {
+    try {
+        const user = requireAuthUser(req, res);
+        if (!user) return;
+        const { projectId } = await bootstrapMartinSession(pool, { userId: user.id, createChat: false });
+        const title = String(req.body.title || 'Новый чат').trim() || 'Новый чат';
+        const chat = await chatSessionStore.createChatSession(projectId, title);
+        await pool.query(`UPDATE chat_sessions SET created_by_user_id = $1 WHERE id = $2`, [user.id, chat.id]);
+        res.status(201).json({ chat, projectId });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.get('/martin/chats', async (req, res) => {
+    try {
+        const user = requireAuthUser(req, res);
+        if (!user) return;
+        const session = await bootstrapMartinSession(pool, { userId: user.id, createChat: false });
+        const chats = await chatSessionStore.listChatSessions(session.projectId);
+        res.json({ chats, projectId: session.projectId });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.delete('/martin/chats', async (req, res) => {
+    try {
+        const user = requireAuthUser(req, res);
+        if (!user) return;
+        const { projectId } = await bootstrapMartinSession(pool, { userId: user.id, createChat: false });
+        await assertProjectAccess(pool, req, projectId);
+        await chatSessionStore.deleteAllChatSessions(projectId);
+        res.json({ ok: true });
+    } catch (err) {
+        if (err instanceof HttpError) return sendAccessError(res, err);
+        res.status(500).json({ error: err.message });
+    }
+});
 
 router.get('/projects', async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM projects ORDER BY created_at DESC');
+        const user = requireAuthUser(req, res);
+        if (!user) return;
+        if (user.role === 'boss') {
+            const result = await pool.query(
+                `SELECT p.*, a.slug AS auditor_slug, a.name AS auditor_name, u.email AS owner_email, u.full_name AS owner_name
+                 FROM projects p
+                 LEFT JOIN auditors a ON a.id = p.auditor_id
+                 LEFT JOIN users u ON u.id = p.owner_user_id
+                 ORDER BY p.created_at DESC`
+            );
+            return res.json(result.rows);
+        }
+        const result = await pool.query(
+            `SELECT p.*, a.slug AS auditor_slug, a.name AS auditor_name
+             FROM projects p
+             LEFT JOIN auditors a ON a.id = p.auditor_id
+             WHERE p.owner_user_id = $1
+             ORDER BY p.created_at DESC`,
+            [user.id]
+        );
         res.json(result.rows);
     } catch (err) {
         res.status(500).json({ error: 'Внутренняя ошибка сервера' });
@@ -829,7 +1762,14 @@ router.post('/projects', async (req, res) => {
     const { name } = req.body;
     if (!name) return res.status(400).json({ error: 'Имя проекта обязательно' });
     try {
-        const result = await pool.query('INSERT INTO projects (name) VALUES ($1) RETURNING *', [name]);
+        const user = requireAuthUser(req, res);
+        if (!user) return;
+        const auditor = await resolveAuditor(pool, 'martin');
+        if (!auditor) return res.status(404).json({ error: 'Аудитор не найден' });
+        const result = await pool.query(
+            `INSERT INTO projects (name, auditor_id, owner_user_id) VALUES ($1, $2, $3) RETURNING *`,
+            [name, auditor.id, user.id]
+        );
         res.status(201).json(result.rows[0]);
     } catch (err) {
         res.status(500).json({ error: 'Внутренняя ошибка сервера' });
@@ -1052,10 +1992,13 @@ router.post('/parser-dispatch', (req, res) => {
 
 router.get('/parse/snapshots/:id', async (req, res) => {
     try {
-        const snap = await snapshotStore.getSnapshot(parseInt(req.params.id, 10));
+        const snapshotId = parseInt(req.params.id, 10);
+        await assertSnapshotAccess(pool, req, snapshotId);
+        const snap = await snapshotStore.getSnapshot(snapshotId);
         if (!snap) return res.status(404).json({ error: 'Снимок не найден' });
         res.json(snap);
     } catch (err) {
+        if (err instanceof HttpError) return sendAccessError(res, err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -1063,12 +2006,14 @@ router.get('/parse/snapshots/:id', async (req, res) => {
 router.get('/parse/snapshots/:id/rows', async (req, res) => {
     try {
         const snapshotId = parseInt(req.params.id, 10);
+        await assertSnapshotAccess(pool, req, snapshotId);
         const page = parseInt(req.query.page || '1', 10);
         const limit = parseInt(req.query.limit || '200', 10);
         const data = await snapshotStore.fetchRowsPage(snapshotId, { page, limit });
         if (!data) return res.status(404).json({ error: 'Снимок не найден' });
         res.json(data);
     } catch (err) {
+        if (err instanceof HttpError) return sendAccessError(res, err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -1076,11 +2021,153 @@ router.get('/parse/snapshots/:id/rows', async (req, res) => {
 router.delete('/parse/snapshots/:id', async (req, res) => {
     try {
         const snapshotId = parseInt(req.params.id, 10);
+        await assertSnapshotAccess(pool, req, snapshotId);
         const snap = await snapshotStore.getSnapshot(snapshotId);
         if (!snap) return res.status(404).json({ error: 'Снимок не найден' });
         await snapshotStore.deleteSnapshot(snapshotId);
         res.json({ ok: true });
     } catch (err) {
+        if (err instanceof HttpError) return sendAccessError(res, err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/egrul/fetch', async (req, res) => {
+    try {
+        const message = String(req.body.message || '').trim();
+        if (!message) return res.status(400).json({ error: 'Нужен message' });
+        if (!isEgrulIntent(message) && !Array.isArray(req.body.inns)) {
+            return res.status(400).json({ error: 'Сообщение не похоже на запрос проверки по ЕГРЮЛ' });
+        }
+
+        const projectId = parseInt(req.body.projectId || req.body.project_id, 10) || null;
+        const sourceSnapshotId =
+            parseInt(req.body.sourceSnapshotId || req.body.activeSnapshotId || req.body.snapshotId, 10) ||
+            null;
+        const chatSessionId = parseInt(req.body.chatSessionId || req.body.chat_session_id, 10) || null;
+
+        const out = await runEgrulCheck(pool, {
+            message,
+            inns: Array.isArray(req.body.inns) ? req.body.inns : undefined,
+            sourceSnapshotId,
+            innColumn: req.body.innColumn || req.body.inn_column || null,
+            projectId,
+        });
+
+        if (!out.ok) {
+            return res.status(422).json({ ok: false, error: out.error });
+        }
+
+        if (chatSessionId && out.snapshotId) {
+            await maybeLinkSnapshotToChat({
+                chatSessionId,
+                snapshotId: out.snapshotId,
+                projectId,
+                label: 'ЕГРЮЛ · проверка контрагентов',
+            });
+        }
+
+        await logChatExchange({
+            chatSessionId,
+            projectId,
+            snapshotId: out.snapshotId,
+            userMessage: message,
+            assistantMessage: out.assistantMessage,
+        });
+
+        res.json(out);
+    } catch (err) {
+        console.error('[egrul/fetch]', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/parse/snapshots/import-text', upload.single('file'), fixUploadNamesMiddleware, async (req, res) => {
+    try {
+        const file = req.file;
+        if (!file) return res.status(400).json({ error: 'Нужен file (.txt)' });
+
+        const routed = await resolveUpload({
+            buffer: file.buffer,
+            fileName: file.originalname,
+        });
+        if (!routed.ok) {
+            return res.status(422).json({ error: (routed.errors || ['Ошибка маршрутизации']).join('; ') });
+        }
+        if (routed.route !== 'text' || !routed.textParse?.rows?.length) {
+            return res.status(422).json({ error: 'Файл не похож на текстовую выгрузку 1С' });
+        }
+
+        const projectId = req.body.project_id || req.body.projectId || null;
+        const session = await buildText1cAutostartResponse(file, routed.textParse, routed, { projectId });
+        const chatSessionId = req.body.chatSessionId ? parseInt(req.body.chatSessionId, 10) : null;
+        if (chatSessionId && session.snapshotId) {
+            await maybeLinkSnapshotToChat({
+                chatSessionId,
+                snapshotId: session.snapshotId,
+                projectId,
+                label: file.originalname,
+            });
+        }
+
+        res.json({
+            ok: true,
+            snapshotId: session.snapshotId,
+            parsePreview: session.parsePreview,
+            rowCount: session.parsePreview?.rowCount ?? 0,
+            assistantMessage: session.assistantMessage,
+        });
+    } catch (err) {
+        console.error('[import-text]', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/parse/snapshots/import-preview', async (req, res) => {
+    try {
+        const headers = Array.isArray(req.body.headers) ? req.body.headers : [];
+        const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+        if (!headers.length) return res.status(400).json({ error: 'headers обязателен' });
+        if (!rows.length) return res.status(400).json({ error: 'rows не пустой' });
+
+        const projectId = req.body.projectId ? parseInt(req.body.projectId, 10) : null;
+        const chatSessionId = req.body.chatSessionId ? parseInt(req.body.chatSessionId, 10) : null;
+        const sourceFileName = String(req.body.sourceFileName || 'preview').trim();
+        const sheetName = String(req.body.sheetName || 'лист').trim();
+        const scenarioId = req.body.scenarioId || null;
+
+        const snapshotId = await snapshotStore.createSnapshot({
+            projectId: Number.isFinite(projectId) ? projectId : null,
+            sourceFileName,
+            sheetName,
+            scenarioId,
+            headers,
+            status: 'parsing',
+        });
+        const rowCount = await snapshotStore.importParsedRows(snapshotId, headers, rows);
+
+        if (chatSessionId) {
+            await maybeLinkSnapshotToChat({
+                chatSessionId,
+                snapshotId,
+                projectId,
+                label: [sourceFileName, sheetName].filter(Boolean).join(' · '),
+            });
+        }
+
+        const page = await snapshotStore.fetchRowsPage(snapshotId, { page: 1, limit: PREVIEW_ROWS_CLIENT });
+        res.json({
+            ok: true,
+            snapshotId,
+            rowCount,
+            parsePreview: {
+                headers: page?.headers || headers,
+                rows: page?.rows || rows.slice(0, PREVIEW_ROWS_CLIENT),
+                rowCount,
+            },
+        });
+    } catch (err) {
+        console.error('[import-preview]', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -1096,11 +2183,8 @@ router.post('/parse/snapshots/:id/apply-operation', async (req, res) => {
             `[snapshot-apply] id=${snapshotId} msg=${message.slice(0, 80)}`
         );
 
-        let chatHistory = Array.isArray(req.body.messages) ? req.body.messages : [];
         const chatSessionId = req.body.chatSessionId ? parseInt(req.body.chatSessionId, 10) : null;
-        if (chatSessionId && !chatHistory.length) {
-            chatHistory = await chatSessionStore.getChatMessages(chatSessionId, 20);
-        }
+        const chatHistory = await resolveChatHistory(req.body);
 
         const result = await applySnapshotOperation(snapshotStore, snapshotId, {
             message,
@@ -1121,8 +2205,22 @@ router.post('/parse/snapshots/:id/apply-operation', async (req, res) => {
             `[snapshot-apply] done ${Date.now() - reqStarted}ms handled=${result.handled} affected=${result.affectedRows || 0}`
         );
 
+        const snap = await snapshotStore.getSnapshot(snapshotId);
+
+        if (result.newSnapshotId && chatSessionId) {
+            const splitLabel =
+                result.tableLabel ||
+                [snap?.sourceFileName, result.tableLabel].filter(Boolean).join(' · ') ||
+                `выборка #${result.newSnapshotId}`;
+            await maybeLinkSnapshotToChat({
+                chatSessionId,
+                snapshotId: result.newSnapshotId,
+                label: splitLabel,
+                projectId: snap?.projectId,
+            });
+        }
+
         if (req.body.logChat && message) {
-            const snap = await snapshotStore.getSnapshot(snapshotId);
             await logChatExchange({
                 chatSessionId,
                 projectId: snap?.projectId,
@@ -1199,9 +2297,11 @@ router.get('/projects/:projectId/chat-history', async (req, res) => {
 router.get('/projects/:projectId/chats', async (req, res) => {
     try {
         const projectId = parseInt(req.params.projectId, 10);
+        await assertProjectAccess(pool, req, projectId);
         const chats = await chatSessionStore.listChatSessions(projectId);
         res.json({ chats });
     } catch (err) {
+        if (err instanceof HttpError) return sendAccessError(res, err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -1209,10 +2309,18 @@ router.get('/projects/:projectId/chats', async (req, res) => {
 router.post('/projects/:projectId/chats', async (req, res) => {
     try {
         const projectId = parseInt(req.params.projectId, 10);
+        await assertProjectAccess(pool, req, projectId);
         const title = String(req.body.title || 'Новый чат').trim() || 'Новый чат';
         const chat = await chatSessionStore.createChatSession(projectId, title);
+        if (req.user?.id) {
+            await pool.query(`UPDATE chat_sessions SET created_by_user_id = $1 WHERE id = $2`, [
+                req.user.id,
+                chat.id,
+            ]);
+        }
         res.status(201).json({ chat });
     } catch (err) {
+        if (err instanceof HttpError) return sendAccessError(res, err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -1220,9 +2328,11 @@ router.post('/projects/:projectId/chats', async (req, res) => {
 router.delete('/projects/:projectId/chats', async (req, res) => {
     try {
         const projectId = parseInt(req.params.projectId, 10);
+        await assertProjectAccess(pool, req, projectId);
         await chatSessionStore.deleteAllChatSessions(projectId);
         res.json({ ok: true });
     } catch (err) {
+        if (err instanceof HttpError) return sendAccessError(res, err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -1230,11 +2340,13 @@ router.delete('/projects/:projectId/chats', async (req, res) => {
 router.delete('/chats/:chatId', async (req, res) => {
     try {
         const chatId = parseInt(req.params.chatId, 10);
+        await assertChatAccess(pool, req, chatId);
         const chat = await chatSessionStore.getChatSession(chatId);
         if (!chat) return res.status(404).json({ error: 'Чат не найден' });
         await chatSessionStore.deleteChatSession(chatId);
         res.json({ ok: true });
     } catch (err) {
+        if (err instanceof HttpError) return sendAccessError(res, err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -1242,12 +2354,14 @@ router.delete('/chats/:chatId', async (req, res) => {
 router.get('/chats/:chatId', async (req, res) => {
     try {
         const chatId = parseInt(req.params.chatId, 10);
+        await assertChatAccess(pool, req, chatId);
         const chat = await chatSessionStore.getChatSession(chatId);
         if (!chat) return res.status(404).json({ error: 'Чат не найден' });
         const snapshots = await chatSessionStore.listChatSnapshots(chatId);
         const messages = await chatSessionStore.getChatMessages(chatId);
         res.json({ chat, snapshots, messages });
     } catch (err) {
+        if (err instanceof HttpError) return sendAccessError(res, err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -1255,9 +2369,11 @@ router.get('/chats/:chatId', async (req, res) => {
 router.get('/chats/:chatId/messages', async (req, res) => {
     try {
         const chatId = parseInt(req.params.chatId, 10);
+        await assertChatAccess(pool, req, chatId);
         const messages = await chatSessionStore.getChatMessages(chatId);
         res.json({ messages });
     } catch (err) {
+        if (err instanceof HttpError) return sendAccessError(res, err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -1288,6 +2404,32 @@ router.delete('/chats/:chatId/snapshots/:snapshotId', async (req, res) => {
         if (!chat) return res.status(404).json({ error: 'Чат не найден' });
         await chatSessionStore.unlinkSnapshot(chatId, snapshotId, { hardDeleteSnapshot: hardDelete });
         res.json({ ok: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/parse/plan-preview', express.json(), async (req, res) => {
+    try {
+        const userMessage = String(req.body.userMessage || '').trim();
+        const files = Array.isArray(req.body.files) ? req.body.files : [];
+        const probe = req.body.probe || null;
+        const parsePlan = await buildParsePlanAsync(userMessage, {
+            fileMetas: files,
+            probe,
+            layoutMeta: req.body.layoutMeta || null,
+            orchestratorAnswers: req.body.orchestratorAnswers || {},
+            explicitScenarioId: req.body.scenarioId || null,
+            explicitFilePrefix: req.body.filePrefix || null,
+            explicitSheetName: req.body.sheetName || null,
+            parseAllSheets: req.body.parseAllSheets,
+        });
+        const reasoningTrace = buildReasoningTrace({
+            parsePlan,
+            outcome: 'plan',
+            fileName: files[0]?.name || files[0]?.relativePath || null,
+        });
+        res.json({ ok: true, parsePlan, reasoningTrace });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1327,47 +2469,139 @@ router.post('/parse/probe', upload.single('file'), fixUploadNamesMiddleware, asy
     }
 });
 
-router.post(
-    '/parse/batch-start',
-    upload.fields([
-        { name: 'files', maxCount: MAX_BATCH_FILES },
-        { name: 'file', maxCount: 1 },
-        { name: 'target', maxCount: 1 },
-    ]),
-    fixUploadNamesMiddleware,
-    async (req, res) => {
-        try {
-            const uploaded = req.files?.files?.length
-                ? req.files.files
-                : req.files?.file || [];
-            const files = uploaded;
-            if (!files.length) return res.status(400).json({ error: 'Нужен хотя бы один файл' });
+async function runBatchStartFromUploads({ files, targetFile, body, res }) {
+    let orchestratorAnswers = {};
+    try {
+        orchestratorAnswers = parseJsonField(body.orchestratorAnswers, {}) || {};
+    } catch {
+        orchestratorAnswers = {};
+    }
 
-            let orchestratorAnswers = {};
-            try {
-                orchestratorAnswers = parseJsonField(req.body.orchestratorAnswers, {}) || {};
-            } catch {
-                orchestratorAnswers = {};
-            }
+    const userMessage = String(body.userMessage || '').trim();
+    const projectId = body.project_id || body.projectId || null;
+    const chatSessionId = body.chatSessionId ? parseInt(body.chatSessionId, 10) : null;
 
-            const userMessage = String(req.body.userMessage || '').trim();
-            const projectId = req.body.project_id || req.body.projectId || null;
-            const chatSessionId = req.body.chatSessionId
-                ? parseInt(req.body.chatSessionId, 10)
-                : null;
-            const scenarioId =
-                req.body.scenarioId ||
-                orchestratorAnswers.scenarioId ||
-                detectBatchScenario(files, userMessage, null);
+    if (body.fromInbox && !userMessage) {
+        return res.status(422).json({
+            error: 'Напиши задачу в чате перед парсом — там могут быть правила и сценарий.',
+        });
+    }
 
-            if (isOpifScenario(scenarioId)) {
+    const parsePlan = await buildParsePlanAsync(userMessage, {
+        files,
+        orchestratorAnswers,
+        explicitScenarioId: body.scenarioId || null,
+        explicitFilePrefix: body.filePrefix || orchestratorAnswers.filePrefix || null,
+        explicitSheetName: body.sheetName || orchestratorAnswers.sheetName || null,
+        parseAllSheets: body.parseAllSheets,
+    });
+    orchestratorAnswers = applyParsePlanToOrchestratorAnswers(parsePlan, orchestratorAnswers);
+
+    const scenarioId =
+        parsePlan.scenarioId ||
+        body.scenarioId ||
+        orchestratorAnswers.scenarioId ||
+        detectBatchScenario(files, userMessage, null);
+
+    const appendSnapshotId = body.appendSnapshotId
+        ? parseInt(body.appendSnapshotId, 10)
+        : null;
+
+    if (appendSnapshotId && files.length >= 1 && !isOpifScenario(scenarioId)) {
+        let savedRulesAppend = [];
+        if (projectId) savedRulesAppend = await fetchSavedRulesByProject(projectId);
+        const appendResult = await handleUniversalAppend({
+            pool,
+            snapshotStore,
+            files,
+            appendSnapshotId,
+            projectId,
+            userMessage,
+            chatSessionId,
+            targetFile,
+            savedRules: savedRulesAppend,
+            maybeLinkSnapshotToChat,
+            logChatExchange,
+        });
+        if (!appendResult.ok) {
+            return res.status(appendResult.status || 422).json({
+                error: appendResult.error,
+                headerMismatch: appendResult.headerMismatch || false,
+            });
+        }
+        return safeResJson(res, {
+            ...appendResult,
+            parsePlan,
+            staged: false,
+            fromInbox: Boolean(body.fromInbox),
+        });
+    }
+
+    let structureGroups = null;
+    let structureRawGroups = null;
+    let mergeStrategy =
+        orchestratorAnswers.mergeStrategy ||
+        orchestratorAnswers.pick_merge_strategy ||
+        parsePlan.mergeStrategy ||
+        null;
+
+    if (files.length > 1 && !isOpifScenario(scenarioId)) {
+        const mergeCtx = await resolveBatchMergeContext({
+            files,
+            orchestratorAnswers,
+            userMessage,
+            scenarioId,
+            appendSnapshotId,
+            isOpif: isOpifScenario(scenarioId),
+        });
+        structureGroups = mergeCtx.groups;
+        structureRawGroups = mergeCtx.rawGroups || null;
+        parsePlan.groups = structureGroups;
+
+        if (!mergeCtx.proceed) {
+            const question = mergeCtx.question;
+            return res.json({
+                ok: true,
+                needsUserInput: true,
+                needsConfirm: true,
+                pendingQuestions: [question],
+                currentQuestion: question,
+                groups: structureGroups,
+                parsePlan,
+                assistantMessage: question.promptTemplate,
+                staged: true,
+                fromInbox: Boolean(body.fromInbox),
+            });
+        }
+        mergeStrategy = mergeCtx.mergeStrategy;
+        parsePlan.mergeStrategy = mergeStrategy;
+        orchestratorAnswers = {
+            ...orchestratorAnswers,
+            mergeStrategy,
+            pick_merge_strategy: mergeStrategy,
+        };
+    }
+
+    const filePrefixForBatch =
+        parsePlan.filePrefix || body.filePrefix || orchestratorAnswers.filePrefix;
+
+    if (isOpifScenario(scenarioId)) {
+                const appendSnapshotId = body.appendSnapshotId
+                    ? parseInt(body.appendSnapshotId, 10)
+                    : null;
+                const brokerChunkIndex = Math.max(1, parseInt(body.brokerChunkIndex || '1', 10));
+                const brokerChunkTotal = Math.max(1, parseInt(body.brokerChunkTotal || '1', 10));
+                const brokerFilesTotal = parseInt(body.brokerFilesTotal || '0', 10) || null;
+                const isLastChunk = brokerChunkIndex >= brokerChunkTotal;
+
                 const parsed = await parseOpifBatch(
                     files,
                     scenarioId,
                     userMessage,
-                    req.body.filePrefix
+                    filePrefixForBatch,
+                    parsePlan.brokerSection || orchestratorAnswers.brokerSection
                 );
-                if (!parsed.rows.length) {
+                if (!parsed.rows.length && !appendSnapshotId) {
                     return res.status(422).json({
                         error: (parsed.errors || ['Нет строк после парса']).join('; '),
                         warnings: parsed.warnings,
@@ -1375,33 +2609,99 @@ router.post(
                 }
 
                 const labelName =
-                    files.length === 1
-                        ? fileNameOf(files[0])
-                        : `${scenarioId}_${files.length}files`;
+                    brokerFilesTotal && brokerFilesTotal > 1
+                        ? `${scenarioId}_${brokerFilesTotal}files`
+                        : files.length === 1
+                          ? fileNameOf(files[0])
+                          : `${scenarioId}_${files.length}files`;
 
-                const snapshotId = await snapshotStore.createSnapshot({
-                    projectId: projectId ? parseInt(projectId, 10) : null,
-                    sourceFileName: labelName,
-                    sheetName: null,
+                let snapshotId = appendSnapshotId;
+                let rowCount = 0;
+
+                if (appendSnapshotId) {
+                    if (parsed.rows.length) {
+                        const appended = await snapshotStore.appendParsedRows(
+                            appendSnapshotId,
+                            parsed.rows
+                        );
+                        rowCount = appended.rowCount;
+                    } else {
+                        const snap = await snapshotStore.getSnapshot(appendSnapshotId);
+                        rowCount = snap?.rowCount ?? 0;
+                    }
+                } else {
+                    snapshotId = await snapshotStore.createSnapshot({
+                        projectId: projectId ? parseInt(projectId, 10) : null,
+                        sourceFileName: labelName,
+                        sheetName: null,
+                        scenarioId,
+                        headers: parsed.headers,
+                        status: 'parsing',
+                    });
+                    rowCount = await snapshotStore.importParsedRows(
+                        snapshotId,
+                        parsed.headers,
+                        parsed.rows
+                    );
+                }
+
+                const previewRows = parsed.rows.length
+                    ? parsed.rows.slice(0, PREVIEW_ROWS_CLIENT)
+                    : [];
+                const snapForPreview =
+                    previewRows.length < 1 && snapshotId
+                        ? await snapshotStore.fetchRowsPage(snapshotId, { page: 1, limit: PREVIEW_ROWS_CLIENT })
+                        : null;
+                const previewHeaders = parsed.headers?.length
+                    ? parsed.headers
+                    : snapForPreview?.headers || OPIF_SNAPSHOT_HEADERS;
+
+                const chunkBody = {
+                    ok: true,
                     scenarioId,
-                    headers: parsed.headers,
-                    status: 'parsing',
-                });
-
-                const rowCount = await snapshotStore.importParsedRows(
+                    scenarioName: scenarioDisplayName(scenarioId),
+                    sourceKind: scenarioId === 'opif_depo' ? 'pdf' : 'excel',
                     snapshotId,
-                    parsed.headers,
-                    parsed.rows
-                );
-
-                const assistantMessage = buildOpifAssistantMessage(scenarioId, {
-                    filesProcessed: parsed.filesProcessed,
-                    rowCount,
-                    prefix: req.body.filePrefix,
+                    parsePreview: {
+                        headers: previewHeaders,
+                        rows: previewRows.length ? previewRows : snapForPreview?.rows || [],
+                        rowCount,
+                    },
                     warnings: parsed.warnings,
-                });
+                    parsePlan,
+                    staged: false,
+                    needsUserInput: false,
+                    brokerChunk: {
+                        index: brokerChunkIndex,
+                        total: brokerChunkTotal,
+                        filesInChunk: parsed.filesProcessed,
+                    },
+                };
 
-                if (chatSessionId) {
+                if (!isLastChunk) {
+                    chunkBody.chunkInProgress = true;
+                    return res.json(chunkBody);
+                }
+
+                const assistantMessage = [
+                    buildOpifAssistantMessage(scenarioId, {
+                        filesProcessed: brokerFilesTotal || parsed.filesProcessed,
+                        filesMatched: brokerFilesTotal || parsed.filesMatched,
+                        rowCount,
+                        prefix: filePrefixForBatch,
+                        brokerSection: parsed.brokerSection,
+                        warnings: parsed.warnings,
+                    }),
+                    body.fromInbox
+                        ? `Источник: **хранилище** на сервере (inbox).`
+                        : '',
+                    brokerChunkTotal > 1 ? `Пачек по ${MAX_BATCH_FILES} файлов: **${brokerChunkTotal}**.` : '',
+                    parsePlan.summary ? `\n📋 План: ${parsePlan.summary}` : '',
+                ]
+                    .filter(Boolean)
+                    .join('\n');
+
+                if (chatSessionId && !appendSnapshotId) {
                     await maybeLinkSnapshotToChat({
                         chatSessionId,
                         snapshotId,
@@ -1417,67 +2717,138 @@ router.post(
                     assistantMessage,
                 });
 
-                const previewRows = parsed.rows.slice(0, PREVIEW_ROWS_CLIENT);
                 return res.json({
-                    ok: true,
-                    scenarioId,
-                    scenarioName: scenarioDisplayName(scenarioId),
-                    sourceKind: scenarioId === 'opif_depo' ? 'pdf' : 'excel',
-                    snapshotId,
-                    parsePreview: {
-                        headers: parsed.headers,
-                        rows: previewRows,
-                        rowCount,
-                    },
-                    warnings: parsed.warnings,
+                    ...chunkBody,
                     assistantMessage,
-                    staged: false,
-                    needsUserInput: false,
+                    chunkInProgress: false,
                 });
+            }
+
+            if (files.length > 1 && userMessage && !isOpifScenario(scenarioId)) {
+                const excelOnly = files.filter((f) => detectSourceKind(fileNameOf(f)) === 'excel');
+                const pdfOnly = files.filter((f) => isPdfLikeFile(f));
+                const homogenousExcel = excelOnly.length === files.length;
+                const homogenousPdf = pdfOnly.length === files.length;
+
+                if (homogenousPdf && mergeStrategy === 'one_table' && scenarioId !== 'broker_pdf') {
+                    return parseMultiplePdfDocumentsFromBatch({
+                        pool,
+                        files: pdfOnly,
+                        projectId,
+                        userMessage,
+                        chatSessionId,
+                        parsePlan,
+                        res,
+                    });
+                }
+
+                if (
+                    (homogenousExcel || homogenousPdf) &&
+                    mergeStrategy &&
+                    !(homogenousPdf && scenarioId === 'broker_pdf' && mergeStrategy === 'per_file')
+                ) {
+                    let savedRulesMulti = [];
+                    if (projectId) savedRulesMulti = await fetchSavedRulesByProject(projectId);
+                    const batchResult = await runBatchWithMergeStrategy({
+                        pool,
+                        snapshotStore,
+                        files: homogenousExcel ? excelOnly : pdfOnly,
+                        rawGroups: structureRawGroups,
+                        mergeStrategy,
+                        targetFile,
+                        projectId,
+                        savedRules: savedRulesMulti,
+                        userMessage,
+                        chatSessionId,
+                        parsePlan,
+                        maybeLinkSnapshotToChat,
+                        logChatExchange,
+                    });
+                    if (!batchResult.ok) {
+                        return res.status(422).json({
+                            error: batchResult.error,
+                            skipped: batchResult.skipped,
+                            parsePlan,
+                        });
+                    }
+                    return safeResJson(res, {
+                        ...batchResult,
+                        parsePlan,
+                        staged: false,
+                        fromInbox: Boolean(body.fromInbox),
+                        needsUserInput: false,
+                    });
+                }
+
+                if (body.pathScope?.path && pdfOnly.length >= 1) {
+                    return parseMultiplePdfDocumentsFromBatch({
+                        pool,
+                        files: pdfOnly,
+                        projectId,
+                        userMessage,
+                        chatSessionId,
+                        parsePlan,
+                        res,
+                    });
+                }
+                if (body.pathScope?.path && excelOnly.length >= 1) {
+                    if (excelOnly.length === 1) {
+                        files = excelOnly;
+                    } else {
+                        let savedRulesMulti = [];
+                        if (projectId) savedRulesMulti = await fetchSavedRulesByProject(projectId);
+                        return parseMultipleExcelWorkbooksFromBatch({
+                            pool,
+                            files: excelOnly,
+                            targetFile,
+                            projectId,
+                            savedRules: savedRulesMulti,
+                            userMessage,
+                            chatSessionId,
+                            parsePlan,
+                            res,
+                        });
+                    }
+                }
             }
 
             if (files.length > 1) {
                 return res.status(422).json({
-                    error: 'Несколько Excel-файлов без OPIF-сценария пока не поддержаны. Укажи «депо» или «брокер».',
+                    error:
+                        'Несколько файлов без явного сценария. Выбери **один файл/папку** через 📎 или напиши задачу: «депо», «брокер 1F018», «разбери ОС» и т.п.',
                 });
             }
 
             const sourceFile = files[0];
-            const targetFile = req.files?.target?.[0];
-            let sheetName = req.body.sheetName;
+            let sheetName = parsePlan.sheetName || body.sheetName;
 
             let savedRules = [];
             if (projectId) savedRules = await fetchSavedRulesByProject(projectId);
 
             const { sheetNames: workbookSheets, defaultSheet } = listSheetNames(sourceFile.buffer);
-            orchestratorAnswers = applyAutostartDefaults(
-                analyzeLayout(sourceFile.buffer, sheetName || defaultSheet, {
-                    fileName: sourceFile.originalname,
-                }),
-                orchestratorAnswers
-            );
+            const rawOrchestratorAnswers = { ...orchestratorAnswers };
+            const explicitScenarioForStructure = parsePlan.scenarioId || body.scenarioId || null;
 
-            const useAllSheets =
-                shouldParseAllSheets({
-                    files,
-                    scenarioId,
-                    parseAllSheets: req.body.parseAllSheets,
-                    orchestratorAnswers,
-                    sheetName,
-                }) ||
-                (workbookSheets.length > 1 &&
-                    !sheetName &&
-                    !orchestratorAnswers?.sheetName &&
-                    !String(orchestratorAnswers?.pick_tree_flatten || '').startsWith('scenario:') &&
-                    !scenarioId);
+            const useAllSheetsEarly = wantsMultiSheetExcelParse({
+                files,
+                sheetNames: workbookSheets,
+                scenarioId: explicitScenarioForStructure,
+                parseAllSheets: body.parseAllSheets,
+                orchestratorAnswers: rawOrchestratorAnswers,
+                sheetName,
+                parsePlan,
+            });
 
-            if (useAllSheets) {
+            if (useAllSheetsEarly) {
+                const multiStarted = Date.now();
+                console.log('[batch-start] multi-sheet parse', fileNameOf(sourceFile));
                 const multi = await parseAllExcelSheets({
                     pool,
                     file: sourceFile,
                     targetFile,
                     projectId,
                     savedRules,
+                    userMessage: userMessage || '',
                 });
 
                 if (!multi.ok) {
@@ -1496,6 +2867,7 @@ router.post(
                     rowCount: p.rowCount,
                     scenarioId: p.scenarioId,
                     scenarioName: p.scenarioName,
+                    validationReport: p.validationReport || null,
                 }));
 
                 if (chatSessionId) {
@@ -1509,17 +2881,55 @@ router.post(
                     }
                 }
                 if (chatSessionId && multi.assistantMessage) {
-                    await logChatExchange({
-                        chatSessionId,
-                        projectId,
-                        snapshotId: multi.primary?.snapshotId,
-                        userMessage: userMessage || '(старт парса)',
-                        assistantMessage: multi.assistantMessage,
-                    });
+                    const chatLogFn = () =>
+                        logChatExchange({
+                            chatSessionId,
+                            projectId,
+                            snapshotId: multi.primary?.snapshotId,
+                            userMessage: userMessage || '(старт парса)',
+                            assistantMessage: multi.assistantMessage,
+                        });
+                    console.log(
+                        '[batch-start] multi-sheet done',
+                        `${multi.parsed.length} sheets in ${Date.now() - multiStarted}ms`
+                    );
+                    const primary = multi.primary;
+                    return safeResJsonAndLogChat(
+                        res,
+                        {
+                            ok: true,
+                            multiSheet: true,
+                            snapshots,
+                            sheetNames: multi.sheetNames,
+                            snapshotId: primary?.snapshotId,
+                            parsePreview: primary?.parsePreview,
+                            scenarioId: primary?.scenarioId,
+                            scenarioName: primary?.scenarioName,
+                            rule: primary?.rule,
+                            layoutAnalysis: primary?.layoutMeta,
+                            structureId: primary?.structureId,
+                            structure: primary?.structure,
+                            validationReport: primary?.validationReport || null,
+                            warnings: multi.warnings,
+                            assistantMessage: multi.assistantMessage,
+                            skippedSheets: multi.skipped,
+                            needsUserInput: false,
+                            needsScenarioChoice: false,
+                            previewIsTentative: false,
+                            userMessage,
+                            parsePlan,
+                            staged: false,
+                        },
+                        chatLogFn
+                    );
                 }
 
+                console.log(
+                    '[batch-start] multi-sheet done',
+                    `${multi.parsed.length} sheets in ${Date.now() - multiStarted}ms`
+                );
                 const primary = multi.primary;
-                return res.json({
+                return safeResJson(res, {
                     ok: true,
                     multiSheet: true,
                     snapshots,
@@ -1530,6 +2940,9 @@ router.post(
                     scenarioName: primary?.scenarioName,
                     rule: primary?.rule,
                     layoutAnalysis: primary?.layoutMeta,
+                    structureId: primary?.structureId,
+                    structure: primary?.structure,
+                    validationReport: primary?.validationReport || null,
                     warnings: multi.warnings,
                     assistantMessage: multi.assistantMessage,
                     skippedSheets: multi.skipped,
@@ -1537,11 +2950,38 @@ router.post(
                     needsScenarioChoice: false,
                     previewIsTentative: false,
                     userMessage,
+                    parsePlan,
                     staged: false,
                 });
             }
 
-            const routed = resolveUpload({
+            const sheetForStructureEarly =
+                sheetName || rawOrchestratorAnswers?.sheetName || defaultSheet;
+
+            const structureHandledEarly = await applyStructureAutostartToBatch({
+                pool,
+                sourceFile,
+                targetFile,
+                sheetName: sheetForStructureEarly,
+                projectId,
+                savedRules,
+                scenarioId: explicitScenarioForStructure,
+                orchestratorAnswers: rawOrchestratorAnswers,
+                userMessage,
+                chatSessionId,
+                parsePlan,
+                res,
+            });
+            if (structureHandledEarly) return;
+
+            orchestratorAnswers = applyAutostartDefaults(
+                analyzeLayout(sourceFile.buffer, sheetName || defaultSheet, {
+                    fileName: sourceFile.originalname,
+                }),
+                orchestratorAnswers
+            );
+
+            const routed = await resolveUpload({
                 buffer: sourceFile.buffer,
                 fileName: sourceFile.originalname,
                 sheetName,
@@ -1556,8 +2996,40 @@ router.post(
                 });
             }
 
+            if (
+                routed.route === 'universal_pdf' ||
+                (routed.sourceKind === 'pdf' && !isOpifScenario(scenarioId))
+            ) {
+                return respondUniversalPdfAutostart(res, {
+                    sourceFile,
+                    routed,
+                    projectId,
+                    userMessage,
+                    chatSessionId,
+                });
+            }
+
             if (routed.route === 'text') {
-                const session = buildText1cAutostartResponse(sourceFile, routed.textParse, routed);
+                const session = await buildText1cAutostartResponse(sourceFile, routed.textParse, routed, {
+                    projectId,
+                });
+                if (chatSessionId && session.snapshotId) {
+                    await maybeLinkSnapshotToChat({
+                        chatSessionId,
+                        snapshotId: session.snapshotId,
+                        projectId,
+                        label: sourceFile.originalname,
+                    });
+                }
+                if (chatSessionId && session.assistantMessage) {
+                    await logChatExchange({
+                        chatSessionId,
+                        projectId,
+                        snapshotId: session.snapshotId,
+                        userMessage: userMessage || '(старт парса)',
+                        assistantMessage: session.assistantMessage,
+                    });
+                }
                 return res.json({ ...session, userMessage });
             }
 
@@ -1594,22 +3066,82 @@ router.post(
                 });
             }
             if (chatSessionId && session.assistantMessage) {
-                await logChatExchange({
-                    chatSessionId,
-                    projectId,
-                    snapshotId: session.snapshotId,
-                    userMessage: userMessage || '(старт парса)',
-                    assistantMessage: session.assistantMessage,
-                });
+                const chatLogFn = () =>
+                    logChatExchange({
+                        chatSessionId,
+                        projectId,
+                        snapshotId: session.snapshotId,
+                        userMessage: userMessage || '(старт парса)',
+                        assistantMessage: session.assistantMessage,
+                    });
+                return safeResJsonAndLogChat(
+                    res,
+                    { ...session, userMessage, staged: false, fromInbox: Boolean(body.fromInbox) },
+                    chatLogFn
+                );
             }
 
-            return res.json({ ...session, userMessage, staged: false });
+            return safeResJson(res, { ...session, userMessage, staged: false, fromInbox: Boolean(body.fromInbox) });
+}
+
+router.post(
+    '/parse/batch-start',
+    upload.fields([
+        { name: 'files', maxCount: MAX_BATCH_FILES },
+        { name: 'file', maxCount: 1 },
+        { name: 'target', maxCount: 1 },
+    ]),
+    fixUploadNamesMiddleware,
+    async (req, res) => {
+        try {
+            const uploaded = req.files?.files?.length
+                ? req.files.files
+                : req.files?.file || [];
+            if (!uploaded.length) {
+                return res.status(400).json({ error: 'Нужен хотя бы один файл' });
+            }
+            await runBatchStartFromUploads({
+                files: uploaded,
+                targetFile: req.files?.target?.[0] || null,
+                body: req.body,
+                res,
+            });
         } catch (err) {
             console.error('[batch-start] error', err.message);
             res.status(500).json({ ok: false, error: err.message });
         }
     }
 );
+
+router.post('/parse/universal', upload.single('file'), fixUploadNamesMiddleware, async (req, res) => {
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'Нужен file' });
+
+    try {
+        const routed = await resolveUpload({
+            buffer: file.buffer,
+            fileName: file.originalname,
+            sheetName: req.body.sheetName,
+        });
+        if (!routed.ok) {
+            return res.status(422).json({ error: (routed.errors || ['Ошибка маршрутизации']).join('; ') });
+        }
+        const projectId = req.body.project_id || req.body.projectId || null;
+        const session = await buildUniversalAutostartResponse(file, routed, {
+            projectId,
+            userMessage: req.body.userMessage || req.body.prompt || '',
+        });
+        if (!session.ok) {
+            if (session.delegateDepo) {
+                return res.status(422).json({ error: 'PDF ДЕПО — используйте раздел ОПИФ.' });
+            }
+            return res.status(422).json({ error: (session.errors || ['Ошибка парсинга']).join('; ') });
+        }
+        res.json(session);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 router.post('/parse/auto-start', upload.fields([{ name: 'file' }, { name: 'target' }]), fixUploadNamesMiddleware, async (req, res) => {
     const sourceFile = req.files?.file?.[0];
@@ -1626,6 +3158,29 @@ router.post('/parse/auto-start', upload.fields([{ name: 'file' }, { name: 'targe
 
         let sheetName = req.body.sheetName;
         const { defaultSheet: autoSheet } = listSheetNames(sourceFile.buffer);
+        const rawOrchestratorAnswers = { ...orchestratorAnswers };
+        const explicitScenarioForStructure = req.body.scenarioId || null;
+        const projectIdEarly = req.body.project_id || req.body.projectId || null;
+        let savedRulesEarly = [];
+        if (projectIdEarly) savedRulesEarly = await fetchSavedRulesByProject(projectIdEarly);
+        const chatSessionIdEarly = req.body.chatSessionId || req.body.chat_session_id;
+        const parsedChatSessionIdEarly = chatSessionIdEarly ? parseInt(chatSessionIdEarly, 10) : null;
+
+        const structureHandledEarly = await applyStructureAutostartToBatch({
+            pool,
+            sourceFile,
+            targetFile,
+            sheetName: sheetName || rawOrchestratorAnswers?.sheetName || autoSheet,
+            projectId: projectIdEarly,
+            savedRules: savedRulesEarly,
+            scenarioId: explicitScenarioForStructure,
+            orchestratorAnswers: rawOrchestratorAnswers,
+            userMessage: req.body.userMessage || '',
+            chatSessionId: parsedChatSessionIdEarly,
+            res,
+        });
+        if (structureHandledEarly) return;
+
         orchestratorAnswers = applyAutostartDefaults(
             analyzeLayout(sourceFile.buffer, sheetName || autoSheet, {
                 fileName: sourceFile.originalname,
@@ -1638,7 +3193,7 @@ router.post('/parse/auto-start', upload.fields([{ name: 'file' }, { name: 'targe
             if (osvSheet && /осв/i.test(osvSheet)) sheetName = osvSheet;
         }
 
-        const routed = resolveUpload({
+        const routed = await resolveUpload({
             buffer: sourceFile.buffer,
             fileName: sourceFile.originalname,
             sheetName,
@@ -1653,15 +3208,39 @@ router.post('/parse/auto-start', upload.fields([{ name: 'file' }, { name: 'targe
             });
         }
 
-        if (routed.route === 'text') {
-            const session = buildText1cAutostartResponse(sourceFile, routed.textParse, routed);
+        if (routed.route === 'universal_pdf' || (routed.sourceKind === 'pdf' && routed.scenarioId === 'upd_ediweb')) {
+            const projectId = req.body.project_id || req.body.projectId || null;
             const chatSessionId = req.body.chatSessionId || req.body.chat_session_id;
             const parsedChatSessionId = chatSessionId ? parseInt(chatSessionId, 10) : null;
+            return respondUniversalPdfAutostart(res, {
+                sourceFile,
+                routed,
+                projectId,
+                userMessage: req.body.userMessage || '',
+                chatSessionId: parsedChatSessionId,
+            });
+        }
+
+        if (routed.route === 'text') {
+            const projectId = req.body.project_id || req.body.projectId || null;
+            const session = await buildText1cAutostartResponse(sourceFile, routed.textParse, routed, {
+                projectId,
+            });
+            const chatSessionId = req.body.chatSessionId || req.body.chat_session_id;
+            const parsedChatSessionId = chatSessionId ? parseInt(chatSessionId, 10) : null;
+            if (parsedChatSessionId && session.snapshotId) {
+                await maybeLinkSnapshotToChat({
+                    chatSessionId: parsedChatSessionId,
+                    snapshotId: session.snapshotId,
+                    projectId,
+                    label: sourceFile.originalname,
+                });
+            }
             if (parsedChatSessionId && session.assistantMessage) {
                 await chatSessionStore.appendChatMessage({
                     chatSessionId: parsedChatSessionId,
-                    projectId: req.body.project_id || req.body.projectId || null,
-                    snapshotId: null,
+                    projectId,
+                    snapshotId: session.snapshotId,
                     role: 'assistant',
                     content: session.assistantMessage,
                 });
@@ -1673,6 +3252,10 @@ router.post('/parse/auto-start', upload.fields([{ name: 'file' }, { name: 'targe
         const projectId = req.body.project_id || req.body.projectId;
         if (projectId) savedRules = await fetchSavedRulesByProject(projectId);
 
+        const chatSessionIdAuto = req.body.chatSessionId || req.body.chat_session_id;
+        const parsedChatSessionIdAuto = chatSessionIdAuto ? parseInt(chatSessionIdAuto, 10) : null;
+        const scenarioIdAuto = req.body.scenarioId || routed.scenarioId || null;
+
         const session = await runMartinSession({
             file: sourceFile,
             targetFile,
@@ -1681,7 +3264,7 @@ router.post('/parse/auto-start', upload.fields([{ name: 'file' }, { name: 'targe
             userMessage: '',
             messages: [],
             isFirstPass: true,
-            scenarioId: req.body.scenarioId || routed.scenarioId || null,
+            scenarioId: scenarioIdAuto,
             orchestratorAnswers,
             savedRules,
             projectId: projectId || null,
@@ -1829,24 +3412,14 @@ router.post('/ai/result-table-action', async (req, res) => {
         const headers = Array.isArray(req.body.headers) ? req.body.headers : [];
         const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
         const options = typeof req.body.options === 'object' && req.body.options ? req.body.options : {};
-        const regexCmd = parseResultTableCommand(message, headers);
-        const skipLlm =
-            regexCmd.action === 'clean_source' ||
-            regexCmd.stripFromSource ||
-            (regexCmd.action === 'filter_rows' && regexCmd.filters?.length) ||
-            (regexCmd.action === 'extract' && /(инвентар|номер).*(дат|дату)|(дат|дату).*(инвентар|номер)/i.test(message));
+        const chatHistory = await resolveChatHistory(req.body);
 
-        let plan = null;
-        if (options.useLlm !== false && message && !skipLlm) {
-            try {
-                plan = await planResultTableActionWithLlm({ message, headers, rows });
-            } catch (e) {
-                plan = null;
-            }
-        }
-
-        const command = mergeResultTableCommand({ message, headers, plan, regexCmd });
-        const planner = command.planner || (plan ? 'llm' : 'regex');
+        const { command, planner, needsSnapshot } = await resolveTableCommand({
+            message,
+            headers,
+            rows,
+            options: { ...options, chatHistory },
+        });
 
         console.log(
             `[result-table-action] planner=${planner} action=${command.action} column=${command.sourceColumn || '-'} rows=${rows.length} msg=${message.slice(0, 80)}`
@@ -1855,6 +3428,17 @@ router.post('/ai/result-table-action', async (req, res) => {
         if (!command.action) {
             console.log(`[result-table-action] unhandled ${Date.now() - reqStarted}ms`);
             return res.json({ ok: true, handled: false, command });
+        }
+
+        if (needsSnapshot) {
+            return res.json({
+                ok: true,
+                handled: false,
+                needsSnapshot: true,
+                command,
+                assistantMessage:
+                    'Эта команда работает только когда таблица сохранена в БД (snapshot). Перезагрузи файл или дождись полного парса — тогда фильтры и мутации пойдут по всем строкам.',
+            });
         }
 
         if (command.action === 'filter_rows') {
@@ -1908,14 +3492,53 @@ router.post('/ai/result-table-action', async (req, res) => {
             });
         }
 
-        if (!command.sourceColumn) {
+        if (command.action === 'split_to_table') {
+            const { applyFilterToRows, buildSplitAssistantMessage } = require('./table_row_filter');
+            if (!command.filters?.length) {
+                return res.json({
+                    ok: true,
+                    handled: true,
+                    command,
+                    assistantMessage:
+                        (command.explanation ? `**Поняла:** ${command.explanation}\n\n` : '') +
+                        'Не смогла разобрать, какие строки переносить. Например: «создай вкладку Lukoil — где Инструмент содержит Lukoil Capital».',
+                });
+            }
+            const filtered = applyFilterToRows(rows, command);
+            console.log(
+                `[result-table-action] split_to_table done ${Date.now() - reqStarted}ms kept=${filtered.kept} removed=${filtered.removed}`
+            );
+            return res.json({
+                ok: true,
+                handled: true,
+                command: { ...command, ...filtered.plan },
+                filteredRows: filtered.rows,
+                rowCount: filtered.kept,
+                tableLabel: command.tableLabel,
+                filterStats: {
+                    before: rows.length,
+                    after: filtered.kept,
+                    removed: filtered.removed,
+                    plan: filtered.plan,
+                },
+                assistantMessage:
+                    (command.explanation ? `**Поняла:** ${command.explanation}\n\n` : '') +
+                    buildSplitAssistantMessage(filtered.plan, {
+                        tableLabel: command.tableLabel,
+                        rowCount: filtered.kept,
+                        sourceRowCount: rows.length,
+                    }),
+            });
+        }
+
+        if (actionNeedsSourceColumn(command.action) && !command.sourceColumn) {
             return res.json({
                 ok: true,
                 handled: true,
                 command,
                 assistantMessage:
                     (command.explanation ? `${command.explanation}\n\n` : '') +
-                    'Не нашла колонку. Напиши: «колонка ОС» (точное имя из заголовка таблицы).',
+                    formatColumnNotFoundMessage(headers, command.rawColumnHint),
             });
         }
 
@@ -1924,7 +3547,10 @@ router.post('/ai/result-table-action', async (req, res) => {
 
         if (command.action === 'extract' || command.action === 'clean_source') {
             const fields =
-                command.extractFields?.length > 0 ? command.extractFields : defaultExtractFields();
+                command.extractFields?.length > 0
+                    ? command.extractFields
+                    : inferExtractFieldsFromMessage(message);
+            const stripTargets = stripTargetsFromFields(fields);
             const doStrip =
                 command.action === 'clean_source' || command.stripFromSource;
             const onlyClean = command.action === 'clean_source';
@@ -1934,7 +3560,7 @@ router.post('/ai/result-table-action', async (req, res) => {
                 const extracted = applyExtractFields(text, fields);
                 const valuesOut = onlyClean ? {} : { ...extracted };
                 if (doStrip && command.sourceColumn) {
-                    valuesOut[command.sourceColumn] = stripExtractedFromText(text);
+                    valuesOut[command.sourceColumn] = stripExtractedFromText(text, stripTargets);
                 }
                 enriched.push({ index: i, values: valuesOut });
             }
@@ -2072,6 +3698,244 @@ router.post('/ai/enrich-column', async (req, res) => {
     }
 });
 
+router.post('/ai/resolve-answer', express.json(), async (req, res) => {
+    try {
+        const { userText, question, layoutMeta } = req.body || {};
+        if (!userText || !question) {
+            return res.status(400).json({ error: 'Нужны userText и question' });
+        }
+        const resolved = await resolveAnswerFromText({
+            userText: String(userText),
+            question,
+            layoutMeta: layoutMeta || null,
+            useLlm: req.body?.useLlm !== false,
+        });
+        if (!resolved) {
+            return res.json({ ok: false, resolved: null });
+        }
+        res.json({ ok: true, resolved });
+    } catch (err) {
+        console.error('/api/ai/resolve-answer:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/ai/converse', async (req, res) => {
+    try {
+        const message = String(req.body.message || '').trim();
+        if (!message) return res.status(400).json({ error: 'Нужен message' });
+
+        let messages = [];
+        let uiContext = null;
+        try {
+            messages = parseJsonField(req.body.messages, []);
+            uiContext = parseJsonField(req.body.uiContext, null);
+        } catch (e) {
+            return res.status(400).json({ error: 'messages/uiContext: некорректный JSON' });
+        }
+
+        const chatSessionId = parseInt(req.body.chatSessionId || req.body.chat_session_id, 10) || null;
+        const projectId = parseInt(req.body.projectId || req.body.project_id, 10) || null;
+        const activeSnapshotId = parseInt(req.body.activeSnapshotId || req.body.active_snapshot_id, 10) || null;
+
+        const projectPack = await buildProjectContextPack({
+            chatStore: chatSessionStore,
+            snapshotStore,
+            chatSessionId,
+            projectId,
+            activeSnapshotId,
+        });
+        const uiPack = buildUiContextFallback(uiContext);
+        let fullContext = mergeContextPacks(projectPack, uiPack);
+
+        const dialogMessages = messages.length
+            ? messages
+            : [{ role: 'user', content: message }];
+
+        let queryResult = null;
+        let queryPlanner = null;
+
+        const { looksLikeReconcileIntent } = require('./reconcile_intent');
+        const { executeReconcileFromMessage } = require('./reconcile_flow');
+        if ((projectId || chatSessionId) && looksLikeReconcileIntent(message)) {
+            const auditor = await resolveAuditor(pool, auditorSlugFromRequest(req));
+            const reconcileOut = await executeReconcileFromMessage({
+                message,
+                snapshotStore,
+                chatSessionStore,
+                auditorSlug: auditor?.slug || 'martin',
+                projectId,
+                chatSessionId,
+                activeSnapshotId,
+            });
+
+            if (reconcileOut.needsClarification) {
+                await logChatExchange({
+                    chatSessionId,
+                    projectId,
+                    snapshotId: activeSnapshotId,
+                    userMessage: message,
+                    assistantMessage: reconcileOut.assistantMessage,
+                });
+                return res.json({
+                    ok: true,
+                    assistantMessage: reconcileOut.assistantMessage,
+                    reconcileClarification: true,
+                    questions: reconcileOut.questions || [],
+                    catalog: reconcileOut.catalog || null,
+                });
+            }
+
+            if (reconcileOut.ok && reconcileOut.reconcileOperation) {
+                if (chatSessionId && reconcileOut.snapshotId) {
+                    await maybeLinkSnapshotToChat({
+                        chatSessionId,
+                        snapshotId: reconcileOut.snapshotId,
+                        label: reconcileOut.plan?.reportLabel
+                            ? `${reconcileOut.plan.reportLabel}: ${reconcileOut.plan.left?.label} ↔ ${reconcileOut.plan.right?.label}`
+                            : undefined,
+                        projectId,
+                    });
+                }
+                await logChatExchange({
+                    chatSessionId,
+                    projectId,
+                    snapshotId: reconcileOut.snapshotId,
+                    userMessage: message,
+                    assistantMessage: reconcileOut.assistantMessage,
+                });
+                return res.json({
+                    ok: true,
+                    assistantMessage: reconcileOut.assistantMessage,
+                    reconcileOperation: true,
+                    snapshotId: reconcileOut.snapshotId,
+                    headers: reconcileOut.headers,
+                    tableMeta: reconcileOut.tableMeta,
+                    summary: reconcileOut.summary,
+                    plan: reconcileOut.plan,
+                });
+            }
+
+            if (reconcileOut.assistantMessage) {
+                await logChatExchange({
+                    chatSessionId,
+                    projectId,
+                    snapshotId: activeSnapshotId,
+                    userMessage: message,
+                    assistantMessage: reconcileOut.assistantMessage,
+                });
+                return res.json({
+                    ok: true,
+                    assistantMessage: reconcileOut.assistantMessage,
+                });
+            }
+        }
+
+        if (activeSnapshotId) {
+            const snap = await snapshotStore.getSnapshot(activeSnapshotId);
+            const samplePage = await snapshotStore.fetchRowsPage(activeSnapshotId, { page: 1, limit: 20 });
+            const headers = snap?.headers || uiContext?.headers || [];
+            const sampleRows = (samplePage?.rows || []).map((r) => {
+                const copy = { ...r };
+                delete copy.__rowIndex;
+                return copy;
+            });
+
+            const { looksLikeTableMutationIntent } = require('./table_work_intent');
+            if (snap?.status === 'ready' && looksLikeTableMutationIntent(message)) {
+                const opResult = await applySnapshotOperation(snapshotStore, activeSnapshotId, {
+                    message,
+                    options: { chatHistory: dialogMessages, useLlm: shouldUseLlmReply() },
+                });
+                if (opResult.handled) {
+                    const freshSnap = await snapshotStore.getSnapshot(activeSnapshotId);
+                    await logChatExchange({
+                        chatSessionId,
+                        projectId,
+                        snapshotId: activeSnapshotId,
+                        userMessage: message,
+                        assistantMessage: opResult.assistantMessage,
+                    });
+                    return res.json({
+                        ok: true,
+                        assistantMessage: opResult.assistantMessage,
+                        tableOperation: true,
+                        headers: opResult.headers || freshSnap?.headers || headers,
+                        newColumns: opResult.newColumns || null,
+                        command: opResult.command || null,
+                        planner: opResult.planner || null,
+                        contextUsed: Boolean(fullContext.trim()),
+                    });
+                }
+                if (!opResult.command?.action) {
+                    fullContext = mergeContextPacks(
+                        fullContext,
+                        '[Система: запрос похож на команду к таблице, но план не построен. НЕ утверждай что колонка добавлена или фильтр применён. Скажи что не разобрала команду и предложи переформулировать.]'
+                    );
+                }
+            }
+
+            const planned = await planTableQuery({
+                message,
+                headers,
+                rows: sampleRows,
+                chatHistory: dialogMessages,
+                useLlm: shouldUseLlmReply(),
+            });
+            queryPlanner = planned.planner;
+            if (planned.plan?.action === 'aggregate') {
+                queryResult = await executeTableQuery(snapshotStore, activeSnapshotId, planned.plan);
+                if (queryResult?.ok) {
+                    fullContext = mergeContextPacks(fullContext, formatQueryResultForLlm(queryResult));
+                }
+            }
+        }
+
+        const fallbackMessage = chatSessionId
+            ? 'Не удалось связаться с ИИ. Попробуй ещё раз или проверь ключ в .env.'
+            : 'Привет! Я Martin. Могу поболтать и помочь с аудитом — прикрепи файл или открой чат сессии.';
+
+        let assistantMessage;
+        const templateAnswer = queryResult?.ok ? formatQueryResultMessage(queryResult) : null;
+
+        if (templateAnswer && !queryResult.groups?.length) {
+            assistantMessage = templateAnswer;
+        } else if (shouldUseLlmReply()) {
+            assistantMessage = await generateMartinConverseReply({
+                messages: dialogMessages,
+                context: fullContext,
+                fallbackMessage: templateAnswer || fallbackMessage,
+            });
+        } else {
+            assistantMessage =
+                templateAnswer ||
+                `${fallbackMessage}\n\nТы спросил: «${message}». ` +
+                    (uiContext?.headers?.length
+                        ? `Вижу таблицу: ${uiContext.headers.slice(0, 6).join(', ')}…`
+                        : 'Прикрепи файл — разберём.');
+        }
+
+        await logChatExchange({
+            chatSessionId,
+            projectId,
+            snapshotId: activeSnapshotId,
+            userMessage: message,
+            assistantMessage,
+        });
+
+        res.json({
+            ok: true,
+            assistantMessage,
+            contextUsed: Boolean(fullContext.trim()),
+            queryResult: queryResult?.ok ? queryResult : null,
+            queryPlanner,
+        });
+    } catch (err) {
+        console.error('/api/ai/converse:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 router.post('/ai/chat', upload.fields([{ name: 'file' }, { name: 'target' }]), fixUploadNamesMiddleware, async (req, res) => {
     try {
         const profileFamily =
@@ -2148,8 +4012,25 @@ router.post('/ai/generate-rule-from-file', upload.single('file'), fixUploadNames
     }
 });
 
+registerPdfParseScenarioRoutes(router, { pool });
+
+registerInboxRoutes(router, {
+    pool,
+    snapshotStore,
+    maybeLinkSnapshotToChat,
+    logChatExchange,
+    runBatchStartFromUploads,
+});
+
+registerReconcileRoutes(router, {
+    pool,
+    snapshotStore,
+    chatSessionStore,
+    maybeLinkSnapshotToChat,
+});
+
 module.exports = router;
 module.exports.processAiChat = processAiChat;
 module.exports.runMartinSession = runMartinSession;
-module.exports.applyV2HintsFromUserMessage = applyV2HintsFromUserMessage;
+module.exports.runBatchStartFromUploads = runBatchStartFromUploads;
 module.exports.bootstrapRuleFromUserMessage = bootstrapRuleFromUserMessage;

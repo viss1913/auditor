@@ -8,13 +8,17 @@ const {
 } = require('./opif_martin');
 
 describe('opif probe', () => {
-    it('probeFileList: pdf → opif_depo', () => {
-        const probe = probeFileList([
-            { name: 'depo1.pdf' },
-            { name: 'depo2.pdf' },
-        ]);
+    it('probeFileList: pdf без «депо» → universal, не opif', () => {
+        const probe = probeFileList([{ name: 'contract.pdf' }, { name: 'act.pdf' }]);
         assert.equal(probe.fileCount, 2);
         assert.equal(probe.byKind.pdf, 2);
+        assert.equal(probe.suggestedScenario, null);
+    });
+
+    it('probeFileList: pdf в папке DEPO → opif_depo', () => {
+        const probe = probeFileList([
+            { name: 'depo1.pdf', relativePath: 'DEPO/depo1.pdf' },
+        ]);
         assert.equal(probe.suggestedScenario, 'opif_depo');
     });
 
@@ -34,7 +38,7 @@ describe('opif probe', () => {
     });
 
     it('extractFilePrefix из userMessage', () => {
-        assert.equal(extractFilePrefix('префикс Fskdlh', null), 'fskdlh');
+        assert.equal(extractFilePrefix('префикс Fskdlh', null), 'Fskdlh_');
     });
 
     it('filterFilesForScenario: broker prefix', () => {

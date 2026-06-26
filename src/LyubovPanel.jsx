@@ -1,6 +1,8 @@
 import React from 'react';
 import { getParserProfile } from './parserProfiles';
 
+/** @deprecated Legacy OPIF sidebar workspace. Universal audit lives in AI Martin (`/api/reconcile/*`). */
+
 const LINKS = [
   { page: 'opif_uk', label: 'УК', hint: 'Выгрузка управляющей компании → trades' },
   { page: 'opif_broker', label: 'Брокер', hint: 'Отчёт брокера → trades' },

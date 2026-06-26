@@ -37,7 +37,7 @@ function classifyByLevels(label, levelsCompiled) {
     const t = String(label || '').trim();
     if (!t) return { kind: 'skip', levelId: null };
     if (SKIP_LABEL.test(t) || HEADER_SKIP.test(t)) return { kind: 'skip', levelId: null };
-    if (/^(ОАО|ООО|АО|ПАО|ЗАО)\s/i.test(t)) return { kind: 'entity', levelId: null };
+    if (/^(ОАО|ООО|АО|ПАО|ЗАО)(\s|$)/i.test(t)) return { kind: 'entity', levelId: null };
     if (/Обороты\s+за\s+\d{4}/i.test(t)) return { kind: 'period', levelId: null };
 
     for (const lvl of levelsCompiled) {
@@ -52,6 +52,27 @@ function hasOsvTurnover(row) {
     for (let c = 1; c <= 6; c++) {
         const n = toNum(row[c]);
         if (n !== null && n !== 0) return true;
+    }
+    return false;
+}
+
+function osvTurnoverSignature(row) {
+    return [1, 2, 3, 4, 5, 6].map((c) => toNum(row[c])).join('|');
+}
+
+/** ОП-строка с теми же оборотами, что и следующий объект/период — дубль, не выводим. */
+function shouldSkipSubdivisionSubtotal(data, rowIndex, row, nameCol, levelsCompiled) {
+    const sig = osvTurnoverSignature(row);
+    for (let j = rowIndex + 1; j < Math.min(data.length, rowIndex + 12); j++) {
+        const label = cellText(data[j], nameCol);
+        if (!label) continue;
+        const { kind, levelId } = classifyByLevels(label, levelsCompiled);
+        if (kind === 'skip') continue;
+        if (kind === 'level' && (levelId === 'subdivision' || levelId === 'account')) break;
+        if ((kind === 'other' || kind === 'period') && hasOsvTurnover(data[j])) {
+            return osvTurnoverSignature(data[j]) === sig;
+        }
+        break;
     }
     return false;
 }
@@ -156,6 +177,7 @@ function walkLevelsStack(data, rule, options = {}) {
     const emitAggregateRows = Boolean(
         options.emitAggregateRows ?? hierarchy.emit_aggregate_rows
     );
+    const emitAggregateLevelIds = hierarchy.emit_aggregate_level_ids || [];
     const nameCol = rule.layout?.name_column ?? 0;
     const startRow = rule.layout?.data_start_row ?? 0;
     const rowOutlineLevels = options.rowOutlineLevels || [];
@@ -172,6 +194,12 @@ function walkLevelsStack(data, rule, options = {}) {
     for (const id of levelOrder) stack[id] = '';
     let entity = '';
     let pendingObject = '';
+    for (const row of data.slice(0, 10)) {
+        const t = cellText(row, nameCol);
+        if (/^(ОАО|ООО|АО|ПАО|ЗАО)(\s|$)/i.test(t) && t.length <= 120) {
+            entity = entity || t;
+        }
+    }
 
     const results = [];
     const treeSample = [];
@@ -231,7 +259,15 @@ function walkLevelsStack(data, rule, options = {}) {
                     treeSample,
                     sampleLimit,
                 });
-            } else if (emitAggregateRows && hasNums) {
+            } else if (
+                emitAggregateRows &&
+                hasNums &&
+                (!emitAggregateLevelIds.length || emitAggregateLevelIds.includes(levelId)) &&
+                !(
+                    levelId === 'subdivision' &&
+                    shouldSkipSubdivisionSubtotal(data, i, row, nameCol, levelsCompiled)
+                )
+            ) {
                 emitLevelRow({
                     i,
                     label,
@@ -289,8 +325,6 @@ function walkLevelsStack(data, rule, options = {}) {
                 for (const lvl of levels) targets[lvl.target] = stack[lvl.id] || '';
                 targets['Объект'] = label;
                 if (entity) targets['Юрлицо'] = entity;
-                const y = label.match(/(\d{4})/);
-                targets['Год'] = y ? y[1] : '';
                 Object.assign(targets, {
                     'Сальдо Дт начало': toNum(row[1]),
                     'Сальдо Кт начало': toNum(row[2]),

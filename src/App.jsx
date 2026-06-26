@@ -1,10 +1,8 @@
 import React, { useState, useRef, useMemo } from 'react';
 import './index.css';
 import AiMartin from './AiMartin';
-import ParserHub from './ParserHub';
-import LyubovPanel from './LyubovPanel';
-import ParserPlaceholder from './ParserPlaceholder';
-import KseniyaPanel from './KseniyaPanel';
+import { clearAuthToken } from './auth';
+import { apiBase, legacyApiRoot } from './apiBase';
 
 function parseDate(str) {
   if (!str) return new Date(0);
@@ -23,9 +21,12 @@ const PAGE = {
   AUDIT_DEALS: 'audit_deals',
 };
 
+/** Legacy sidebar ОПИФ — только если явно включён (основной контур в Martin). */
+const SHOW_LEGACY_OPIF = import.meta.env.VITE_SHOW_LEGACY_OPIF === '1';
+/** @deprecated OPIF sidebar (УК/Брокер/ДЕПО/Аудит). Hidden unless VITE_SHOW_LEGACY_OPIF=1. Use AI Martin reconcile. */
+
 function App() {
   const [page, setPage] = useState(PAGE.AI_MARTIN);
-  const [parserProfile, setParserProfile] = useState('anton');
   const [opifExpanded, setOpifExpanded] = useState(true);
   const [activeTab, setActiveTab] = useState('uk'); // для данных: uk | broker | depo | audit
   const [sourceMode, setSourceMode] = useState('classic'); // 'classic' | 'ai' — переключение УК/ИИ УК внутри раздела
@@ -59,7 +60,7 @@ function App() {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`http://localhost:3001/trades?source=${activeTab}`);
+      const response = await fetch(`${legacyApiRoot()}/trades?source=${activeTab}`);
       if (response.ok) {
         const data = await response.json();
         if (activeTab === 'uk') setUkData(data);
@@ -93,7 +94,7 @@ function App() {
     setAuditPreviewLoading(true);
     setAuditPreview(null);
     try {
-      const response = await fetch('http://localhost:3001/audit/preview');
+      const response = await fetch(`${legacyApiRoot()}/audit/preview`);
       if (!response.ok) throw new Error('Ошибка сервера');
       const data = await response.json();
       setAuditPreview(data);
@@ -107,7 +108,7 @@ function App() {
   const runAudit = async () => {
     setAuditLoading(true);
     try {
-      const url = auditDebug ? 'http://localhost:3001/audit?debug=1' : 'http://localhost:3001/audit';
+      const url = auditDebug ? `${legacyApiRoot()}/audit?debug=1` : `${legacyApiRoot()}/audit`;
       const response = await fetch(url);
       if (!response.ok) throw new Error('Ошибка сервера');
       const data = await response.json();
@@ -184,11 +185,18 @@ function App() {
   };
 
   const exportCsv = () => {
-    const headers = activeTab === 'uk'
+    const headers = activeTab === 'depo'
+      ? ['Дата рег.', 'Вид сделки', 'Название', 'Счет', 'Счет/счет ДЕПО', 'Рег. №', 'ISIN', 'Валюта', 'Кол-во', 'Сумма', 'Комиссия', 'Источник']
+      : activeTab === 'uk'
       ? ['Дата рег.', 'Вид сделки', 'Название', 'Счет', 'Рег. №', 'ISIN', 'Валюта', 'Кол-во', 'Сумма', 'Комиссия', 'Источник']
       : ['Дата рег.', 'Вид сделки', 'Название', 'Счет', 'Рег. №', 'ISIN', 'Валюта', 'Кол-во', 'Сумма', 'Комиссия', 'Источник'];
     const rows = currentData.map(r => (activeTab === 'uk' ? [
       r.registrationDate, r.operationType, r.name, r.debit_account, r.regNum, r.isin, r.currency,
+      String(Number(r.quantity)).replace('.', ','),
+      String(r.amount).replace('.', ','),
+      String(r.fee).replace('.', ',')
+    ] : activeTab === 'depo' ? [
+      r.registrationDate || r.period, r.operationType, r.name, r.debit_account, r.depo_account || '', r.regNum, r.isin, r.currency,
       String(Number(r.quantity)).replace('.', ','),
       String(r.amount).replace('.', ','),
       String(r.fee).replace('.', ',')
@@ -249,7 +257,7 @@ function App() {
     formData.append('mode', mode);
     filesToUpload.forEach(file => formData.append('files', file));
     try {
-      const response = await fetch('http://localhost:3001/upload', { method: 'POST', body: formData });
+      const response = await fetch(`${legacyApiRoot()}/upload`, { method: 'POST', body: formData });
       if (!response.ok) { const e = await response.json(); throw new Error(e.error || 'Ошибка сервера'); }
       const data = await response.json();
       if (activeTab === 'uk') setUkData(data);
@@ -273,7 +281,7 @@ function App() {
     formData.append('file', aiUkFiles[0]);
     formData.append('prompt', aiPrompt);
     try {
-      const response = await fetch('http://localhost:3001/api/ai/generate-rule-from-file', {
+      const response = await fetch(`${apiBase()}/ai/generate-rule-from-file`, {
         method: 'POST',
         body: formData
       });
@@ -306,7 +314,7 @@ function App() {
     aiUkFiles.forEach(file => formData.append('files', file));
 
     try {
-      const response = await fetch('http://localhost:3001/upload', { method: 'POST', body: formData });
+      const response = await fetch(`${legacyApiRoot()}/upload`, { method: 'POST', body: formData });
       if (!response.ok) {
         const errBody = await response.json().catch(() => ({}));
         throw new Error(errBody.error || 'Ошибка парсинга');
@@ -325,7 +333,7 @@ function App() {
   const clearAllData = async () => {
     if (!confirm('Удалить все данные по этому источнику?')) return;
     try {
-      const response = await fetch(`http://localhost:3001/trades?source=${activeTab}`, { method: 'DELETE' });
+      const response = await fetch(`${legacyApiRoot()}/trades?source=${activeTab}`, { method: 'DELETE' });
       if (response.ok) {
         if (activeTab === 'uk') setUkData([]);
         else if (activeTab === 'broker') setBrokerData([]);
@@ -353,13 +361,6 @@ function App() {
       {!martinFullscreen && (
       <aside className="sidebar">
         <div className="sidebar-brand">BankFuture Audit</div>
-        {page === PAGE.AI_MARTIN && (
-          <ParserHub
-            variant="sidebar"
-            selectedId={parserProfile}
-            onSelect={setParserProfile}
-          />
-        )}
         <nav className="sidebar-nav">
           <button
             className={`sidebar-item ${page === PAGE.AI_MARTIN ? 'active' : ''}`}
@@ -368,6 +369,7 @@ function App() {
             <span className="sidebar-icon">🤖</span>
             AI Martin
           </button>
+          {SHOW_LEGACY_OPIF ? (
           <div className="sidebar-group">
             <button
               className="sidebar-group-title"
@@ -387,6 +389,7 @@ function App() {
               </div>
             )}
           </div>
+          ) : null}
           <button className={`sidebar-item ${page === PAGE.AUDIT_CONTRACTS ? 'active' : ''}`} onClick={() => setPage(PAGE.AUDIT_CONTRACTS)}>
             <span className="sidebar-icon">📄</span>
             Аудит договоров
@@ -397,7 +400,16 @@ function App() {
           </button>
         </nav>
         <div className="sidebar-footer">
-          <button className="sidebar-item">Выход</button>
+          <button
+            type="button"
+            className="sidebar-item"
+            onClick={() => {
+              clearAuthToken();
+              window.location.reload();
+            }}
+          >
+            Выход
+          </button>
         </div>
       </aside>
       )}
@@ -422,31 +434,12 @@ function App() {
 
         {/* AI Martin — диалог + правила парсинга */}
         {page === PAGE.AI_MARTIN && (
-          <>
-            {parserProfile === 'anton' && (
-              <AiMartin
-                onUkParsed={(data) => {
-                  setUkData(data);
-                  setActiveTab('uk');
-                }}
-              />
-            )}
-            {parserProfile === 'lyubov' && (
-              <LyubovPanel
-                onNavigate={(key) => {
-                  const map = {
-                    opif_uk: PAGE.OPIF_UK,
-                    opif_broker: PAGE.OPIF_BROKER,
-                    opif_depo: PAGE.OPIF_DEPO,
-                    opif_audit: PAGE.OPIF_AUDIT,
-                  };
-                  if (map[key]) setPage(map[key]);
-                }}
-              />
-            )}
-            {parserProfile === 'pavel' && <ParserPlaceholder profileId="pavel" />}
-            {parserProfile === 'kseniya' && <KseniyaPanel />}
-          </>
+          <AiMartin
+            onUkParsed={(data) => {
+              setUkData(data);
+              setActiveTab('uk');
+            }}
+          />
         )}
 
         {/* Исходные файлы — заглушка */}
@@ -795,6 +788,7 @@ function App() {
                       <th>Вид сделки</th>
                       <th>Название</th>
                       <th>Счет</th>
+                      {activeTab === 'depo' && <th>Счет/счет ДЕПО</th>}
                       <th>Рег. №</th>
                       <th>ISIN</th>
                       <th>Вал.</th>
@@ -810,6 +804,7 @@ function App() {
                         <td>{row.operationType || ''}</td>
                         <td title={row.name}>{row.name.length > 30 ? row.name.substring(0, 30) + '...' : row.name}</td>
                         <td>{row.debit_account || ''}</td>
+                        {activeTab === 'depo' && <td>{row.depo_account || ''}</td>}
                         <td>{row.regNum || ''}</td>
                         <td>{row.isin || ''}</td>
                         <td>{row.currency || ''}</td>
@@ -819,7 +814,7 @@ function App() {
                       </tr>
                     ))}
                     {currentRows.length === 0 && (
-                      <tr><td colSpan={10} style={{ textAlign: 'center', padding: '2rem', opacity: 0.5 }}>Ничего не нашли по запросу «{searchQuery}»</td></tr>
+                      <tr><td colSpan={activeTab === 'depo' ? 11 : 10} style={{ textAlign: 'center', padding: '2rem', opacity: 0.5 }}>Ничего не нашли по запросу «{searchQuery}»</td></tr>
                     )}
                   </tbody>
                 </table>

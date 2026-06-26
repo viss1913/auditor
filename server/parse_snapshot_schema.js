@@ -14,6 +14,7 @@ const PARSE_SNAPSHOT_DDL = `
         scenario_id TEXT,
         rule_id INTEGER,
         headers JSONB NOT NULL DEFAULT '[]'::jsonb,
+        table_meta JSONB NOT NULL DEFAULT '{}'::jsonb,
         row_count INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'parsing',
         error_message TEXT,
@@ -37,6 +38,7 @@ const PARSE_SNAPSHOT_DDL = `
         message TEXT,
         command_json JSONB,
         rows_affected INTEGER DEFAULT 0,
+        rollback_payload JSONB,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 

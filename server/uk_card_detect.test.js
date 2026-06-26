@@ -49,7 +49,7 @@ describe('uk_card_detect', () => {
 
         const rule = applyScenario('uk_card', layout);
         assert.equal(rule.layout.layout_type, 'fixed_columns');
-        assert.equal(rule.conditions.debit_account_prefix, '58.01');
+        assert.equal(rule.conditions.debit_account_prefix, undefined);
         assert.equal(rule.conditions.mode, 'full');
     });
 

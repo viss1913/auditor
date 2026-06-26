@@ -4,8 +4,6 @@ const cors = require('cors');
 const xlsx = require('xlsx');
 const path = require('path');
 const dotenv = require('dotenv');
-const { Pool } = require('pg');
-const fs = require('fs');
 
 // Пробуем оба пути — из server/ и из корня
 const path1 = path.resolve(__dirname, '../.env');
@@ -15,7 +13,15 @@ if (!process.env.DB_HOST) dotenv.config({ path: path2 });
 console.log('[ENV PATH]', path1, '| DB_HOST:', process.env.DB_HOST);
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: true, credentials: true }));
+app.use((req, res, next) => {
+    if (String(req.url || '').includes('/inbox')) {
+        console.log(
+            `[http] ${req.method} ${req.url} origin=${req.headers.origin || '-'} len=${req.headers['content-length'] || '?'}`
+        );
+    }
+    next();
+});
 app.use(express.json({ limit: '20mb' }));
 
 // Подключаем новый роутер изолированно
@@ -27,18 +33,23 @@ const { runParseEngine } = require('./parse_engine');
 const { V2_ONLY_MSG } = require('./parse_preview');
 const { parseBroker } = require('./parse_broker');
 const { parseDepo } = require('./parse_depo');
+const { getPool } = require('./db_pool');
+const { createAuthMiddleware, registerAuthRoutes } = require('./auth');
+const { ensureUsersSchema } = require('./user_schema');
+
+const pool = getPool();
+
+registerAuthRoutes(app, pool);
+app.use(createAuthMiddleware(pool));
+
 app.use('/api', aiParserApi);
 app.use('/api', kseniyaApi);
 
 const upload = multer({ dest: 'uploads/' });
 
-const pool = new Pool({
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '5432'),
-    database: process.env.DB_NAME || 'auditor',
-    user: process.env.DB_USER || 'postgres',
-    password: String(process.env.DB_PASSWORD || '1qazXSW@'),
-});
+function tradeOwnerId(req) {
+    return req.user?.id ?? null;
+}
 
 // Проверка подключения и создание таблиц
 const initDb = async () => {
@@ -75,6 +86,12 @@ const initDb = async () => {
 
         const { PARSE_SNAPSHOT_DDL } = require('./parse_snapshot_schema');
         await pool.query(PARSE_SNAPSHOT_DDL);
+        await pool.query(
+            `ALTER TABLE parse_snapshots ADD COLUMN IF NOT EXISTS table_meta JSONB NOT NULL DEFAULT '{}'::jsonb;`
+        );
+        const { ensureAuditorsSchema } = require('./auditor_schema');
+        await ensureAuditorsSchema(pool);
+        await ensureUsersSchema(pool);
 
         console.log('✅ База данных готова (таблицы проверены)');
     } catch (err) {
@@ -142,11 +159,17 @@ app.post('/upload', upload.array('files'), async (req, res) => {
     if (type === 'broker') sourceName = 'Broker';
     else if (type === 'depo') sourceName = 'DEPO';
 
+    const ownerId = tradeOwnerId(req);
+    if (!ownerId) return res.status(401).json({ error: 'Требуется вход' });
+
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         if (mode === 'overwrite') {
-            await client.query('DELETE FROM trades WHERE source = $1', [sourceName]);
+            await client.query('DELETE FROM trades WHERE source = $1 AND owner_user_id = $2', [
+                sourceName,
+                ownerId,
+            ]);
         }
 
         let ruleJson = null;
@@ -204,23 +227,26 @@ app.post('/upload', upload.array('files'), async (req, res) => {
                 const chunk = results.slice(i, i + chunkSize);
                 const values = [];
                 const placeholders = chunk.map((c, idx) => {
-                    const o = idx * 12; // 12 параметров
+                    const o = idx * 13;
                     values.push(
                         c.period, c.operationType || '', c.name, c.regNum, c.isin,
                         c.quantity, c.amount, c.currency, c.registrationDate, c.fee,
-                        c.debit_account, c.credit_account
+                        c.debit_account, c.credit_account, ownerId
                     );
-                    return `($${o + 1}, $${o + 2}, $${o + 3}, $${o + 4}, $${o + 5}, $${o + 6}, $${o + 7}, $${o + 8}, $${o + 9}, $${o + 10}, $${o + 11}, $${o + 12}, '${sourceName}')`;
+                    return `($${o + 1}, $${o + 2}, $${o + 3}, $${o + 4}, $${o + 5}, $${o + 6}, $${o + 7}, $${o + 8}, $${o + 9}, $${o + 10}, $${o + 11}, $${o + 12}, '${sourceName}', $${o + 13})`;
                 }).join(',');
 
                 await client.query(`INSERT INTO trades 
-                    (period, operation_type, security_name, reg_number, isin, quantity, amount, currency, registration_date, fee, debit_account, credit_account, source) 
+                    (period, operation_type, security_name, reg_number, isin, quantity, amount, currency, registration_date, fee, debit_account, credit_account, source, owner_user_id) 
                     VALUES ${placeholders}`, values);
             }
         }
         await client.query('COMMIT');
 
-        const finalResult = await client.query('SELECT * FROM trades WHERE source = $1 ORDER BY id ASC', [sourceName]);
+        const finalResult = await client.query(
+            'SELECT * FROM trades WHERE source = $1 AND owner_user_id = $2 ORDER BY id ASC',
+            [sourceName, ownerId]
+        );
         res.json(finalResult.rows.map(r => ({
             period: r.period ? new Date(r.period).toLocaleDateString('ru-RU') : '',
             operationType: r.operation_type || '',
@@ -247,12 +273,14 @@ app.post('/upload', upload.array('files'), async (req, res) => {
 app.delete('/trades', async (req, res) => {
     const { source } = req.query;
     if (!source) return res.status(400).json({ error: 'Укажи источник' });
+    const ownerId = tradeOwnerId(req);
+    if (!ownerId) return res.status(401).json({ error: 'Требуется вход' });
 
     const s = source.toLowerCase();
     const sourceName = (s === 'uk') ? 'UK' : (s === 'broker' ? 'Broker' : 'DEPO');
 
     try {
-        await pool.query('DELETE FROM trades WHERE source = $1', [sourceName]);
+        await pool.query('DELETE FROM trades WHERE source = $1 AND owner_user_id = $2', [sourceName, ownerId]);
         res.json({ success: true });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -261,14 +289,22 @@ app.delete('/trades', async (req, res) => {
 
 app.get('/trades', async (req, res) => {
     let { source } = req.query;
+    const ownerId = tradeOwnerId(req);
+    if (!ownerId) return res.status(401).json({ error: 'Требуется вход' });
     if (source) {
         const s = source.toLowerCase();
         source = (s === 'uk') ? 'UK' : (s === 'broker' ? 'Broker' : 'DEPO');
     }
     try {
         const query = source
-            ? { text: 'SELECT * FROM trades WHERE source = $1 ORDER BY id ASC', values: [source] }
-            : { text: 'SELECT * FROM trades ORDER BY id ASC' };
+            ? {
+                  text: 'SELECT * FROM trades WHERE source = $1 AND owner_user_id = $2 ORDER BY id ASC',
+                  values: [source, ownerId],
+              }
+            : {
+                  text: 'SELECT * FROM trades WHERE owner_user_id = $1 ORDER BY id ASC',
+                  values: [ownerId],
+              };
 
         const result = await pool.query(query);
         const formatted = result.rows.map(r => ({
@@ -292,12 +328,24 @@ app.get('/trades', async (req, res) => {
 });
 
 // =============== ПОДГОТОВКА К АУДИТУ (что в базах, какие ключи строятся) ===============
+/** @deprecated Legacy OPIF audit on `trades`. Use Martin universal reconcile (`/api/reconcile/*`). */
 app.get('/audit/preview', async (req, res) => {
     try {
+        const ownerId = tradeOwnerId(req);
+        if (!ownerId) return res.status(401).json({ error: 'Требуется вход' });
         const [ukRes, brokerRes, depoRes] = await Promise.all([
-            pool.query("SELECT id, period, registration_date, operation_type, security_name, reg_number, isin, quantity, amount FROM trades WHERE source = 'UK' ORDER BY period, id"),
-            pool.query("SELECT id, period, registration_date, operation_type, security_name, reg_number, isin, quantity FROM trades WHERE source = 'Broker'"),
-            pool.query("SELECT id, period, registration_date, operation_type, security_name, reg_number, isin, quantity FROM trades WHERE source = 'DEPO' ORDER BY period, id")
+            pool.query(
+                "SELECT id, period, registration_date, operation_type, security_name, reg_number, isin, quantity, amount FROM trades WHERE source = 'UK' AND owner_user_id = $1 ORDER BY period, id",
+                [ownerId]
+            ),
+            pool.query(
+                "SELECT id, period, registration_date, operation_type, security_name, reg_number, isin, quantity FROM trades WHERE source = 'Broker' AND owner_user_id = $1",
+                [ownerId]
+            ),
+            pool.query(
+                "SELECT id, period, registration_date, operation_type, security_name, reg_number, isin, quantity FROM trades WHERE source = 'DEPO' AND owner_user_id = $1 ORDER BY period, id",
+                [ownerId]
+            ),
         ]);
 
         const norm = (s) => String(s || '').trim().toUpperCase().replace(/[\s\-]/g, '');
@@ -391,14 +439,20 @@ app.get('/audit/preview', async (req, res) => {
 });
 
 // =============== АУДИТ ===============
+/** @deprecated Legacy OPIF three-way audit on `trades`. Use Martin universal reconcile (`/api/reconcile/*`). */
 app.get('/audit', async (req, res) => {
     try {
+        const ownerId = tradeOwnerId(req);
+        if (!ownerId) return res.status(401).json({ error: 'Требуется вход' });
         const debug = req.query.debug === '1' || req.query.debug === 'true';
 
         const [ukRes, brokerRes, depoRes] = await Promise.all([
-            pool.query("SELECT * FROM trades WHERE source = 'UK' ORDER BY period ASC"),
-            pool.query("SELECT * FROM trades WHERE source = 'Broker'"),
-            pool.query("SELECT * FROM trades WHERE source = 'DEPO'")
+            pool.query(
+                "SELECT * FROM trades WHERE source = 'UK' AND owner_user_id = $1 ORDER BY period ASC",
+                [ownerId]
+            ),
+            pool.query("SELECT * FROM trades WHERE source = 'Broker' AND owner_user_id = $1", [ownerId]),
+            pool.query("SELECT * FROM trades WHERE source = 'DEPO' AND owner_user_id = $1", [ownerId]),
         ]);
 
         const brokerRows = brokerRes.rows;
@@ -589,4 +643,7 @@ app.get('/audit', async (req, res) => {
 
 
 const PORT = 3001;
-app.listen(PORT, () => console.log(`Сервер Асоль на порту ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Сервер Асоль на порту ${PORT}`));
+const PARSE_HTTP_TIMEOUT_MS = Number(process.env.MARTIN_PARSE_TIMEOUT_MS || 1_800_000);
+server.requestTimeout = PARSE_HTTP_TIMEOUT_MS;
+server.headersTimeout = PARSE_HTTP_TIMEOUT_MS + 60_000;

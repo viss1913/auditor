@@ -7,23 +7,69 @@ const {
     canProbeExtension,
 } = require('./excel_probe_bridge');
 
-function readWorkbook(source) {
-    if (Buffer.isBuffer(source)) {
-        return xlsx.read(source, { type: 'buffer', cellStyles: true });
-    }
-    return xlsx.readFile(source, { cellStyles: true });
+/** openpyxl-probe на крупных xlsx — минуты; для classify/journal хватает SheetJS */
+const PROBE_MAX_BYTES = 4 * 1024 * 1024;
+/** cellStyles на файлах >8 МБ — минуты RAM/CPU; outline для UK на таких размерах редко нужен */
+const CELL_STYLES_MAX_BYTES = 8 * 1024 * 1024;
+
+function shouldUseExcelProbe(source, explicit) {
+    if (explicit === false) return false;
+    if (explicit === true) return true;
+    const buf = Buffer.isBuffer(source) ? source : null;
+    if (!buf) return true;
+    return buf.length <= PROBE_MAX_BYTES;
 }
 
-/** Предпочитаем «Исходная ОСВ», не «Исходная КС». */
+function readWorkbook(source) {
+    const buf = Buffer.isBuffer(source) ? source : null;
+    const useStyles = !buf || buf.length <= CELL_STYLES_MAX_BYTES;
+    const readOpts = useStyles ? { cellStyles: true } : {};
+    if (Buffer.isBuffer(source)) {
+        return xlsx.read(source, { type: 'buffer', ...readOpts });
+    }
+    return xlsx.readFile(source, readOpts);
+}
+
+/** Служебные вкладки 1С/аудита — не данные для парса */
+function isMetaSheetName(sheetName) {
+    const s = String(sheetName || '').trim();
+    if (!s) return true;
+    if (/^(выводы|пояснен|задание|титул|содержание|readme|инструкц|процедур)/i.test(s)) {
+        return true;
+    }
+    // Эталон/мэппинг и сводные листы ТЗ — не исходные данные для парса
+    if (/мэппинг|mapping/i.test(s)) return true;
+    if (/результат\s+для\s+отч/i.test(s)) return true;
+    return false;
+}
+
+function isLikelyDataSheetName(sheetName) {
+    const s = String(sheetName || '').trim();
+    if (!s || isMetaSheetName(s)) return false;
+    if (/^(TDSheet|Лист\d*)$/i.test(s)) return true;
+    if (/исходн|осв|кс|рд_|карт|обработ/i.test(s)) return true;
+    return true;
+}
+
+/** Предпочитаем «Исходная ОСВ», не «Исходная КС»; пропускаем «Выводы» и пр. */
 function pickPreferredSheet(sheetNames, explicit) {
     const names = sheetNames || [];
     if (explicit && names.includes(explicit)) return explicit;
+
+    const dataSheets = names.filter(isLikelyDataSheetName);
+    const pool = dataSheets.length ? dataSheets : names;
+
     return (
-        names.find((s) => /исходн.*осв/i.test(s)) ||
-        names.find((s) => /исходн/i.test(s) && !/кс/i.test(s)) ||
-        names.find((s) => /осв/i.test(s) && !/кс/i.test(s)) ||
-        names.find((s) => /исходн/i.test(s)) ||
-        names[0] ||
+        pool.find((s) => /исходн.*выгрузк/i.test(s)) ||
+        pool.find((s) => /исходн.*осв/i.test(s)) ||
+        pool.find((s) => /исходн/i.test(s) && !/кс/i.test(s) && !/мэппинг|mapping/i.test(s)) ||
+        pool.find((s) => /осв/i.test(s) && !/кс/i.test(s)) ||
+        pool.find((s) => /^TDSheet$/i.test(s)) ||
+        pool.find((s) => /^лист\d*$/i.test(s)) ||
+        pool.find((s) => /^рд_/i.test(s)) ||
+        pool.find((s) => /исходн/i.test(s)) ||
+        pool.find((s) => /карт/i.test(s)) ||
+        pool[0] ||
         null
     );
 }
@@ -183,8 +229,11 @@ function readSheetWithMeta(source, sheetName, options = {}) {
         options.fileName ||
         (typeof source === 'string' ? path.basename(source) : 'probe.xlsx');
 
+    const useExcelProbe = shouldUseExcelProbe(buffer || source, options.useExcelProbe);
+
     const probe = resolveProbe(buffer || source, sheetName, {
         ...options,
+        useExcelProbe,
         fileName,
     });
 
@@ -213,7 +262,27 @@ function readSheetWithMeta(source, sheetName, options = {}) {
     };
 }
 
+/** Снимок листа в памяти — переиспользуем между preview и import (без повторного xlsx.read). */
+function sheetLoadFromMeta(loaded) {
+    if (!loaded) return null;
+    return {
+        data: loaded.data || [],
+        sheetName: loaded.sheetName,
+        rowOutlineLevels: loaded.rowOutlineLevels,
+        hasOutline: loaded.hasOutline,
+        styleHints: loaded.styleHints,
+        skipRowIndices: loaded.skipRowIndices,
+        hiddenRowIndices: loaded.hiddenRowIndices,
+        excelProbe: loaded.excelProbe,
+    };
+}
+
 module.exports = {
+    PROBE_MAX_BYTES,
+    shouldUseExcelProbe,
+    sheetLoadFromMeta,
+    isMetaSheetName,
+    isLikelyDataSheetName,
     readWorkbook,
     readSheetWithMeta,
     extractRowOutlineLevels,

@@ -58,6 +58,25 @@ describe('parse_engine fixed_columns: УК 58.01 quantity column', () => {
         }
     });
 
+    it('включает проводку с Кт 58.01 (Дт 90.02) — без фильтра только по дебету', () => {
+        const rule = loadExampleRule('uk_card.json');
+        const rows = buildUkCardSheet({ qtyCol: 7 });
+        rows[7][6] = '90.02.1';
+        rows[7][9] = '58.01.4';
+        const tmp = writeTempXlsx(rows);
+        try {
+            const out = runParseEngine(tmp, rule);
+            assert.equal(out.ok, true);
+            assert.equal(out.rowCount, 1);
+            assert.equal(out.rows[0].debit_account, '90.02.1');
+            assert.equal(out.rows[0].credit_account, '58.01.4');
+        } finally {
+            try {
+                require('fs').unlinkSync(tmp);
+            } catch {}
+        }
+    });
+
     it('читает quantity из колонки I (index 8) если quantity_column=8', () => {
         const rule = loadExampleRule('uk_card.json');
         rule.multi_row.quantity_column = 8;

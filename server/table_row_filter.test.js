@@ -6,6 +6,8 @@ const {
     applyFilterToRows,
     buildFilterDeleteQuery,
     sanitizeFilterPlan,
+    matchesDimensionValue,
+    rowMatchesFilter,
     mergeFilterPlans,
 } = require('./table_row_filter');
 
@@ -102,6 +104,25 @@ describe('table_row_filter', () => {
         assert.equal(out.removed, 1);
     });
 
+    it('buildFilterDeleteQuery: кириллические empty-фильтры', () => {
+        const osHeaders = ['Контрагент', 'Договор', 'Оборот Дт'];
+        const { sql, plan } = buildFilterDeleteQuery(
+            7,
+            {
+                mode: 'remove',
+                filters: [
+                    { column: 'Контрагент', op: 'empty' },
+                    { column: 'Договор', op: 'empty' },
+                ],
+            },
+            osHeaders
+        );
+        assert.ok(sql);
+        assert.equal(plan.filters.length, 2);
+        assert.ok(sql.includes("data->>'Контрагент'"));
+        assert.ok(sql.includes("data->>'Договор'"));
+    });
+
     it('buildFilterDeleteQuery: SQL с snapshot_id', () => {
         const { sql, params, plan } = buildFilterDeleteQuery(42, {
             mode: 'keep',
@@ -160,6 +181,19 @@ describe('table_row_filter', () => {
         assert.equal(merged.kept, 2);
     });
 
+    it('matchesDimensionValue: «4» не матчит Подразделение 14', () => {
+        assert.equal(matchesDimensionValue('Подразделение 4', '4'), true);
+        assert.equal(matchesDimensionValue('Подразделение 14', '4'), false);
+        assert.equal(matchesDimensionValue('Подразделение 24', '4'), false);
+        assert.equal(
+            rowMatchesFilter(
+                { Подразделение: 'Подразделение 4' },
+                { column: 'Подразделение', op: 'eq', value: '4' }
+            ),
+            true
+        );
+    });
+
     it('sanitizeFilterPlan отсекает неизвестные колонки', () => {
         const plan = sanitizeFilterPlan(
             {
@@ -171,5 +205,41 @@ describe('table_row_filter', () => {
             UK_HEADERS
         );
         assert.equal(plan.filters.length, 1);
+    });
+
+    it('parseFilterIntent: оставь строки где есть значение в колонке Объект', () => {
+        const headers = ['Группа', 'Подразделение', 'Объект', 'ОС'];
+        const cmd = parseFilterIntent(
+            'оставь строки только там где есть значение в колонке Объект',
+            headers
+        );
+        assert.equal(cmd.action, 'filter_rows');
+        assert.equal(cmd.mode, 'keep');
+        assert.equal(cmd.filters.length, 1);
+        assert.equal(cmd.filters[0].column, 'Объект');
+        assert.equal(cmd.filters[0].op, 'not_empty');
+    });
+
+    it('parseFilterIntent: где Объект не пусто', () => {
+        const headers = ['Группа', 'Объект', 'ОС'];
+        const cmd = parseFilterIntent('оставь только строки где Объект не пусто', headers);
+        assert.equal(cmd.filters.length, 1);
+        assert.equal(cmd.filters[0].column, 'Объект');
+        assert.equal(cmd.filters[0].op, 'not_empty');
+    });
+
+    it('applyFilterToRows: keep not_empty Объект', () => {
+        const rows = [
+            { Объект: '80-001', ОС: 'Стол' },
+            { Объект: '', ОС: 'Стул' },
+            { Объект: '80-002', ОС: 'Шкаф' },
+        ];
+        const out = applyFilterToRows(rows, {
+            mode: 'keep',
+            filters: [{ column: 'Объект', op: 'not_empty' }],
+        });
+        assert.equal(out.kept, 2);
+        assert.equal(out.removed, 1);
+        assert.ok(!out.rows.some((r) => !String(r['Объект'] || '').trim()));
     });
 });

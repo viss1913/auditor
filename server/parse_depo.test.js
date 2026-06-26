@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseDepoLines, extractAccountFromFilename } = require('./parse_depo');
+const { parseDepoLines, extractAccountFromFilename, extractDepoAccountFromLines } = require('./parse_depo');
 
 describe('parse_depo', () => {
     it('extractAccountFromFilename из скобок', () => {
@@ -11,8 +11,26 @@ describe('parse_depo', () => {
         assert.equal(extractAccountFromFilename('report (55).pdf'), '55');
     });
 
+    it('extractDepoAccountFromLines из шапки выписки', () => {
+        const lines = [
+            'Наименование счета/счета ДЕПО:ООО ВИМ Сбережения',
+            'Счет/счет ДЕПО:ТУD0043780',
+            'Тип счета/счета ДЕПО:Торговый счет депо',
+        ];
+        assert.equal(extractDepoAccountFromLines(lines), 'ТУD0043780');
+    });
+
+    it('extractDepoAccountFromLines не путает с разделом счета', () => {
+        const lines = [
+            'Раздел счета/счета ДЕПО: ТУD0043780TO350020 БРОКЕРСКИЙ',
+            'Счет/счет ДЕПО: ТУD0043590',
+        ];
+        assert.equal(extractDepoAccountFromLines(lines), 'ТУD0043590');
+    });
+
     it('parseDepoLines: зачисление ЦБ с ISIN', () => {
         const lines = [
+            'Счет/счет ДЕПО:ТУD0043780',
             'ПАО Сбербанк',
             '(Наименование эмитента, тип ценных бумаг)',
             'RU0009029540',
@@ -26,6 +44,7 @@ describe('parse_depo', () => {
         assert.equal(rows[0].operationType, 'Зачисление ЦБ');
         assert.equal(rows[0].period, '01.03.2024');
         assert.equal(rows[0].debit_account, '55');
+        assert.equal(rows[0].depo_account, 'ТУD0043780');
         assert.equal(rows[0].isin, 'RU0009029540');
         assert.equal(rows[0].quantity, 100);
     });

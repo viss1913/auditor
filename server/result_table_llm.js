@@ -9,6 +9,14 @@ const ALLOWED_ACTIONS = new Set([
     'delete_column',
     'clean_source',
     'filter_rows',
+    'split_to_table',
+    'replace_values',
+    'expand_ks_analytics',
+    'move_column',
+    'rename_column',
+    'add_column',
+    'duplicate_column',
+    'undo_last',
     'none',
 ]);
 
@@ -51,8 +59,20 @@ function buildResultTablePlannerPrompt({ message, headers, samplesByHeader, chat
 - clean_source — только очистить текст в source_column (убрать номер/дату из ячейки), без новых колонок
 - classify — классифицировать ячейки (аренда/движимое/недвижимое) через auditor_rule
 - delete_column — удалить целую колонку из таблицы (не путать с clean_source)
-- filter_rows — оставить или убрать СТРОКИ по условиям на колонках (не путать с delete_column)
+- filter_rows — оставить или убрать СТРОКИ по условиям на колонках В ТЕКУЩЕЙ таблице (исходные строки удаляются)
+- split_to_table — создать НОВУЮ вкладку/таблицу с подмножеством строк; исходная таблица НЕ меняется (если пользователь просит «новую таблицу», «вкладку», «перенеси в новую»)
+- replace_values — заменить значения в колонке по правилам (например operationType: Списание ЦБ → продажа)
+- expand_ks_analytics — раскрыть composite-колонки «Аналитика Дт/Кт» в плоские поля
+- move_column — переставить колонку (после/перед другой)
+- rename_column — переименовать колонку
+- add_column — добавить колонку; new_column_name — отображаемое имя из запроса (например «Тип сделки», НЕ operation_type_classified); after_column + position after|before — вставить рядом с якорем
+- Если просят «Тип сделки» / «поступление ц/б → покупка» по operation_type — action add_column или fill_column, new_column_name: «Тип сделки», fill из operation_type через containsRules в explanation, НЕ classify и НЕ extract_fields
+- duplicate_column — скопировать колонку под новым именем
+- undo_last — отменить последнюю операцию (filter_rows или delete_column)
 - none — непонятно
+
+Для split_to_table укажи table_label — короткое имя новой вкладки (например «ВТБ»).
+Условия отбора строк — те же filters/mode/combine, что и для filter_rows.
 
 Для filter_rows:
 - mode: keep (оставить только подходящие) | remove (убрать подходящие)
@@ -61,6 +81,9 @@ function buildResultTablePlannerPrompt({ message, headers, samplesByHeader, chat
 - column — ТОЧНОЕ имя из списка headers
 - op: eq | ne | contains | starts_with | gt | lt | empty | not_empty
 - пример: debit_account eq 58.01.4 AND credit_account eq 76.07.2
+- «убери строки где контрагент и договор пусто» → mode remove, filters: [{column:"Контрагент",op:"empty"},{column:"Договор",op:"empty"}], combine and
+- «оставь строки только там где есть значение в колонке Объект» → mode keep, filters: [{column:"Объект",op:"not_empty"}]
+- «где Объект не пусто» → mode keep, filters: [{column:"Объект",op:"not_empty"}]
 
 Колонки таблицы (выбери source_column ТОЛЬКО из этого списка, точное имя):
 ${JSON.stringify(headers || [])}
@@ -88,13 +111,23 @@ ${activeFilter ? JSON.stringify(activeFilter, null, 2) : '(нет)'}
 
 Для classify заполни auditor_rule текстом правил от пользователя.
 
+Примеры add_column:
+- «надо создать колонку после document, назови Тип сделки» → action add_column, new_column_name: "Тип сделки", after_column: "document", position: "after"
+- «добавь колонку Комментарий» → action add_column, new_column_name: "Комментарий"
+
 Запрос пользователя:
 ${String(message || '')}
 
 Верни ТОЛЬКО JSON:
 {
-  "action": "extract|clean_source|classify|delete_column|filter_rows|none",
+  "action": "extract|clean_source|classify|delete_column|filter_rows|split_to_table|replace_values|expand_ks_analytics|move_column|rename_column|add_column|duplicate_column|undo_last|none",
+  "table_label": "имя новой вкладки или null",
   "source_column": "имя из списка или null",
+  "after_column": "якорная колонка для move_column или null",
+  "position": "after|before",
+  "new_column_name": "новое имя колонки или null",
+  "column": "колонка для replace_values",
+  "mappings": [{ "from": "старое", "to": "новое" }],
   "auditor_rule": "строка или пусто",
   "strip_from_source": true,
   "extract_fields": [{ "target_column": "...", "pattern": "...", "field": "inventory|date|address|other", "description": "..." }],
@@ -122,6 +155,31 @@ function sanitizePlan(raw, headers) {
         deleteColumn = resolveColumnHint(deleteColumn, headers);
     }
 
+    let afterColumn = String(raw?.after_column || raw?.afterColumn || '').trim();
+    if (afterColumn && headers?.length && !headers.includes(afterColumn)) {
+        afterColumn = resolveColumnHint(afterColumn, headers) || null;
+    }
+    if (afterColumn && headers?.length && !headers.includes(afterColumn)) afterColumn = null;
+
+    let newColumnName = String(raw?.new_column_name || raw?.newColumnName || '').trim() || null;
+
+    let column = String(raw?.column || '').trim();
+    if (column && headers?.length && !headers.includes(column)) {
+        column = resolveColumnHint(column, headers) || column;
+    }
+    if (column && headers?.length && !headers.includes(column)) column = null;
+
+    const mappings = Array.isArray(raw?.mappings)
+        ? raw.mappings
+              .map((m) => ({
+                  from: String(m?.from || '').trim(),
+                  to: String(m?.to || '').trim(),
+              }))
+              .filter((m) => m.from && m.to)
+        : [];
+
+    const position = /before|перед/i.test(String(raw?.position || '')) ? 'before' : 'after';
+
     const extractFields = Array.isArray(raw?.extract_fields)
         ? raw.extract_fields
               .map((f) => ({
@@ -134,7 +192,7 @@ function sanitizePlan(raw, headers) {
         : [];
 
     const filterPlan =
-        action === 'filter_rows'
+        action === 'filter_rows' || action === 'split_to_table'
             ? sanitizeFilterPlan(
                   {
                       mode: raw?.mode,
@@ -152,6 +210,12 @@ function sanitizePlan(raw, headers) {
         stripFromSource: Boolean(raw?.strip_from_source ?? raw?.stripFromSource),
         extractFields,
         deleteColumn: deleteColumn || null,
+        afterColumn: afterColumn || null,
+        position,
+        newColumnName,
+        column: column || null,
+        mappings,
+        tableLabel: String(raw?.table_label || raw?.tableLabel || '').trim() || null,
         mode: filterPlan.mode,
         combine: filterPlan.combine,
         filters: filterPlan.filters,
@@ -186,5 +250,7 @@ module.exports = {
     planResultTableActionWithLlm,
     pickColumnSamples,
     buildSamplesByHeader,
+    buildResultTablePlannerPrompt,
+    formatChatHistory,
     sanitizePlan,
 };

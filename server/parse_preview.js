@@ -14,42 +14,73 @@ function validateRule(rule) {
     return validateParsingRuleV2(rule);
 }
 
-function runParse(filePath, rule) {
+function runParse(filePath, rule, engineOpts = {}) {
     const validated = validateRule(rule);
     if (!validated.ok) {
         throw new Error(validated.errors.join('; '));
     }
-    const out = runParseEngine(filePath, validated.rule);
+    const out = runParseEngine(filePath, validated.rule, engineOpts);
     if (!out.ok) throw new Error(out.errors.join('; '));
-    return { headers: out.headers, rows: out.rows, warnings: out.warnings || [] };
+    return { headers: out.headers, rows: out.rows, warnings: out.warnings || [], rule: out.rule };
 }
 
-function runParseFull(filePath, rule) {
+/**
+ * @param {string|null} filePath — null если передан engineOpts.sheetLoad
+ * @param {Object} rule
+ * @param {{ sheetLoad?: object, maxSourceRows?: number }} [engineOpts]
+ */
+function runParseFull(filePath, rule, engineOpts = {}) {
     const validated = validateRule(rule);
     if (!validated.ok) {
         return { ok: false, errors: validated.errors };
     }
-    const { headers, rows, warnings = [] } = runParse(filePath, validated.rule);
+    const out = runParseEngine(filePath, validated.rule, engineOpts);
+    if (!out.ok) {
+        return { ok: false, errors: out.errors };
+    }
     return {
         ok: true,
-        rule: validated.rule,
-        headers,
-        rows,
-        rowCount: rows.length,
-        warnings,
+        rule: out.rule,
+        headers: out.headers,
+        rows: out.rows,
+        rowCount: out.rows.length,
+        warnings: out.warnings,
+        sheetName: out.sheetName,
     };
 }
 
-function runParsePreview(filePath, rule, limit = 50) {
-    const full = runParseFull(filePath, rule);
+/**
+ * @param {string|null} filePath
+ * @param {Object} rule
+ * @param {number} [previewRowLimit=50] — сколько строк отдать клиенту
+ * @param {{ sheetLoad?: object, maxSourceRows?: number }} [engineOpts]
+ *   maxSourceRows — быстрая проба: парсим только первые N строк листа (не весь файл)
+ */
+function runParsePreview(filePath, rule, previewRowLimit = 50, engineOpts = {}) {
+    const full = runParseFull(filePath, rule, engineOpts);
     if (!full.ok) return full;
     return {
         ok: true,
         rule: full.rule,
         headers: full.headers,
-        rows: full.rows.slice(0, limit),
+        rows: full.rows.slice(0, previewRowLimit),
         rowCount: full.rowCount,
         warnings: full.warnings,
+        sheetName: full.sheetName,
+    };
+}
+
+/** Обрезка полного результата для клиента без повторного парса. */
+function clientPreviewFromParseResult(full, previewRowLimit = 50) {
+    if (!full?.ok) return full;
+    return {
+        ok: true,
+        rule: full.rule,
+        headers: full.headers,
+        rows: full.rows.slice(0, previewRowLimit),
+        rowCount: full.rowCount,
+        warnings: full.warnings,
+        sheetName: full.sheetName,
     };
 }
 
@@ -68,13 +99,14 @@ function withTempFile(buffer, originalName, fn) {
     }
 }
 
-const PREVIEW_ROWS_CLIENT = 200;
+const PREVIEW_ROWS_CLIENT = 50;
 
 module.exports = {
     validateRule,
     runParse,
     runParseFull,
     runParsePreview,
+    clientPreviewFromParseResult,
     withTempFile,
     V2_ONLY_MSG,
     PREVIEW_ROWS_CLIENT,

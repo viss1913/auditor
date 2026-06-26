@@ -34,8 +34,23 @@ dist-ssr
 output/
 word/
 server/_auto_start_out*.json
+server/_compare58.txt
+server/_desktop_xlsx.txt
+server/_dir_out.txt
+server/_docx_tmp/
+server/_tmp58slice.xlsx
+server/_trace_full.txt
+server/_trace_lite.txt
+server/scripts/trace_58_1_output.json.txt
+server/data/inbox/
+server/data/egrul/
+server/data/test_upload.xlsx
 
 # Client sample data (keep locally, do not push)
 docs/ksenia/
 docs/Anton/
+
+# Immers / deploy secrets (SSH keys)
+immers/
+*.pem
 

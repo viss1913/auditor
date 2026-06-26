@@ -17,12 +17,13 @@ if (!fs.existsSync(FIXTURE)) {
 }
 
 describe('uk_card mechel fixture', () => {
-    it('probe выбирает quantity col 7, не сальдо col 8', () => {
+    it('probe выбирает quantity col 7, balance col 8', () => {
         const xlsx = require('xlsx');
         const wb = xlsx.readFile(FIXTURE);
         const data = xlsx.utils.sheet_to_json(wb.Sheets.TDSheet, { header: 1, defval: '' });
         const probe = probeUkLayout(data, { data_start_row: 7 });
         assert.equal(probe.quantity_column, 7);
+        assert.equal(probe.balance_column, 8);
         assert.equal(probe.has_credit_91, true);
     });
 
@@ -39,6 +40,8 @@ describe('uk_card mechel fixture', () => {
         assert.ok(q10);
         assert.equal(q10.quantity, 10);
         assert.equal(q10.credit_account, '76.07.2');
+        assert.equal(q10.current_balance_bu, 117019539.25);
+        assert.equal(q10.current_balance_qty, 17305836);
         assert.match(q10.operation_type, /Поступление/i);
 
         const rev = out.rows.find((r) => r.amount === 61);

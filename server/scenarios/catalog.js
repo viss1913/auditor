@@ -12,6 +12,17 @@ const SCENARIO_CATALOG = {
         minConfidence: 0.88,
         profileHints: ['uk_card'],
     },
+    uk_osv_58: {
+        id: 'uk_osv_58',
+        name: 'ОСВ УК 58.01 (дерево)',
+        layoutType: 'hierarchy_rows',
+        tableLayout: 'uk_osv_wide',
+        engine: 'uk_osv_martin',
+        ruleExample: null,
+        needsTree: 'yes',
+        minConfidence: 0.9,
+        profileHints: ['uk_osv_58'],
+    },
     os_76_account_card: {
         id: 'os_76_account_card',
         name: 'Карточка счёта 76',
@@ -102,6 +113,16 @@ const SCENARIO_CATALOG = {
         minConfidence: 1,
         profileHints: ['deals_registry_tsv'],
     },
+    upd_ediweb: {
+        id: 'upd_ediweb',
+        name: 'УПД Эдивеб (PDF)',
+        layoutType: 'fixed_rows',
+        engine: 'parse_upd_pdf',
+        ruleExample: null,
+        needsTree: 'no',
+        minConfidence: 0.85,
+        profileHints: ['upd_ediweb'],
+    },
     opif_depo: {
         id: 'opif_depo',
         name: 'ОПИФ — выписки ДЕПО (PDF)',
@@ -122,16 +143,30 @@ const SCENARIO_CATALOG = {
         minConfidence: 1,
         profileHints: ['opif_broker'],
     },
+    broker_pdf: {
+        id: 'broker_pdf',
+        name: 'Брокерский отчёт (PDF)',
+        layoutType: 'fixed_rows',
+        engine: 'pdf_broker_sections',
+        ruleExample: null,
+        needsTree: 'no',
+        minConfidence: 0.5,
+        profileHints: ['broker_pdf', 'broker_report', 'aton'],
+    },
 };
 
 const HINT_TO_SCENARIO = {
     uk_card: 'uk_card',
+    uk_osv_58: 'uk_osv_58',
     os_account_card_76: 'os_76_account_card',
     os_osv_08: 'os_08_osv',
     os_depreciation_01: 'os_01_hierarchy',
     os_wide_years: 'wide_metrics',
+    upd_ediweb: 'upd_ediweb',
     opif_depo: 'opif_depo',
     opif_broker: 'opif_broker',
+    broker_pdf: 'broker_pdf',
+    broker_report: 'broker_pdf',
 };
 
 function getScenarioDef(scenarioId) {

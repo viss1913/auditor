@@ -52,6 +52,53 @@ describe('parse_engine на примере ФАС', () => {
         const srv = out.rows.find((r) => /80-000662/.test(r['Объект']));
         assert.ok(srv);
         assert.equal(srv['Оборот Дт'], 19300);
+
+        const fasTz = path.join(__dirname, '..', 'docs', 'Anton', 'Пример ТЗ ФАС.xlsx');
+        if (fs.existsSync(fasTz)) {
+            const { applyScenario } = require('./scenarios/registry');
+            const { buildColumnCatalog } = require('./excel_column_catalog');
+            const buf = fs.readFileSync(fasTz);
+            const { catalog } = buildColumnCatalog(buf, 'Исходная выгрузка 08');
+            const rule08 = applyScenario('os_08_osv', {
+                column_catalog: catalog,
+                sheetName: 'Исходная выгрузка 08',
+            });
+            const out08 = runParseEngine(fasTz, rule08);
+            const opKcSubtotal = out08.rows.find(
+                (r) => r['Подразделение'] === 'ОП КЦ' && !String(r['Объект'] || '').trim()
+            );
+            assert.ok(opKcSubtotal, 'должна быть строка ОП КЦ с оборотом по подразделению');
+            assert.equal(opKcSubtotal['Оборот Дт'], 1295462.16);
+            assert.ok(out08.rows.some((r) => r['Юрлицо'] === 'ОАО'));
+        }
     });
 
+});
+
+const fasTzXlsx = path.join(__dirname, '..', 'docs', 'Anton', 'Пример ТЗ ФАС.xlsx');
+
+describe('parse_engine ФАС ТЗ (docs/Anton)', () => {
+    it('01 hierarchy: формат ТЗ — начало/амортизация/конец', () => {
+        if (!fs.existsSync(fasTzXlsx)) return;
+        const { applyScenario } = require('./scenarios/registry');
+        const { buildColumnCatalog } = require('./excel_column_catalog');
+        const buf = fs.readFileSync(fasTzXlsx);
+        const { catalog } = buildColumnCatalog(buf, 'Исходная выгрузка 01');
+        const rule = applyScenario('os_01_hierarchy', {
+            column_catalog: catalog,
+            sheetName: 'Исходная выгрузка 01',
+        });
+        const out = runParseEngine(fasTzXlsx, rule);
+        assert.equal(out.ok, true);
+        assert.ok(out.rowCount >= 15);
+        assert.ok(out.headers.includes('2024 - начало'));
+        assert.ok(out.headers.includes('2024 - амортизация'));
+        assert.ok(out.headers.includes('2024 - конец'));
+        assert.equal(out.headers.filter((h) => /2024 - начало/i.test(h)).length, 1);
+        const sample = out.rows.find((r) => /80-000722/.test(r['ОС']));
+        assert.ok(sample);
+        assert.equal(sample['Группа'], 'Здания');
+        assert.equal(sample['Узел'], 'РТК Волгоград');
+        assert.equal(sample['Подразделение'], 'ОП АБГ-Волгоград');
+    });
 });

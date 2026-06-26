@@ -62,3 +62,30 @@ describe('broker prefix from message', () => {
         assert.equal(probe.suggestedScenario, 'opif_broker');
     });
 });
+
+describe('broker section from message', () => {
+    const { extractBrokerSectionFromText } = require('./orchestrator/structure_resolve');
+
+    it('«1.2 не исполнены» → brokerSection 1.2', () => {
+        assert.equal(
+            extractBrokerSectionFromText('нужны только 1.2 сделки обязательства из которых не исполнены'),
+            '1.2'
+        );
+    });
+
+    it('«1.1 прекращены» → brokerSection 1.1', () => {
+        assert.equal(
+            extractBrokerSectionFromText('возьми раздел 1.1 сделки обязательства прекращены'),
+            '1.1'
+        );
+    });
+
+    it('«спарси 1F018 прекращённые» → 1.1', () => {
+        assert.equal(
+            extractBrokerSectionFromText(
+                'Спарси данные 1F018_ таблицы с 1.1. Сделки, обязательства из которых прекращены'
+            ),
+            '1.1'
+        );
+    });
+});

@@ -34,10 +34,11 @@ const PARSER_PROFILES = [
     {
         id: 'pavel',
         name: 'Павел',
-        title: 'Нетиповые Excel / договоры',
-        status: 'planned',
-        engines: [],
+        title: 'Нетиповые Excel / договоры / УПД PDF',
+        status: 'ready',
+        engines: ['pdf_probe', 'parse_upd_pdf', 'universal_parse_orchestrator', 'extraction_rule_v1'],
         endpoints: {
+            parseUniversal: 'POST /api/parse/universal',
             generateRule: 'POST /api/ai/generate-rule-from-file',
         },
         cursorAgent: 'pavel',

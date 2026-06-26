@@ -35,7 +35,7 @@ const PROFILES = {
         id: 'os_76_card',
         scenarioId: 'os_76_account_card',
         layoutType: 'hierarchy_osv',
-        emit_aggregate_rows: true,
+        emit_aggregate_rows: false,
         levels: [
             {
                 id: 'account',
@@ -57,6 +57,8 @@ const PROFILES = {
         id: 'os_08',
         scenarioId: 'os_08_osv',
         layoutType: 'hierarchy_osv',
+        emit_aggregate_rows: true,
+        emit_aggregate_level_ids: ['account', 'subdivision'],
         levels: [
             {
                 id: 'account',
@@ -98,6 +100,9 @@ function applyTreeProfileToRule(rule, profileId) {
     }
     if (profile.emit_aggregate_rows) {
         rule.hierarchy.emit_aggregate_rows = true;
+    }
+    if (profile.emit_aggregate_level_ids?.length) {
+        rule.hierarchy.emit_aggregate_level_ids = [...profile.emit_aggregate_level_ids];
     }
     if (profile.layoutType) {
         rule.layout = rule.layout || {};

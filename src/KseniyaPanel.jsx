@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { getParserProfile } from './parserProfiles';
-
-const API = 'http://localhost:3001/api';
+import { apiBase } from './apiBase';
 
 export default function KseniyaPanel() {
   const profile = getParserProfile('kseniya');
@@ -23,7 +22,7 @@ export default function KseniyaPanel() {
     formData.append('file', selectedFile);
 
     try {
-      const response = await fetch(`${API}/kseniya/parse-text`, {
+      const response = await fetch(`${apiBase()}/kseniya/parse-text`, {
         method: 'POST',
         body: formData,
       });

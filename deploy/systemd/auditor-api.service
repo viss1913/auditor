@@ -1,0 +1,23 @@
+[Unit]
+Description=ИИ-Аудитор API (Node.js Express)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=auditor
+Group=auditor
+WorkingDirectory=/opt/auditor/server
+EnvironmentFile=/opt/auditor/.env
+ExecStart=/usr/bin/node index.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=auditor-api
+
+# Долгие парсинги (до 30 мин)
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
