@@ -5,6 +5,8 @@
   "main": "index.js",
   "scripts": {
     "test": "node --test smart_parse_uk.test.js smart_parse_os.test.js smart_parse_uk.e2e.test.js fixtures_matrix.test.js scenario_router.test.js martin_dialog.test.js martin_tools.test.js llm_client.test.js",
+    "test:pdf-regression": "node scripts/pdf_regression.js",
+    "test:pdf-unit": "node --test universal_parse/pdf_row_scoring.test.js universal_parse/pdf_scenario_quality.test.js universal_parse/pdf_logical_rows.test.js universal_parse/pdf_grid_diff.test.js universal_parse/pdf_grid_preview_utils.test.js",
     "test:all": "node --test \"**/*.test.js\"",
     "test:fixtures": "node --test fixtures_matrix.test.js scenario_router.test.js martin_dialog.test.js",
     "test:db": "node --test parse_snapshot_store.test.js multi_sheet_martin.test.js",

@@ -10,8 +10,12 @@ const {
     findByStructuralFp,
     bumpPdfParseScenarioHit,
     getPdfParseScenarioById,
+    recordPdfScenarioOutcome,
 } = require('./pdf_parse_scenario_store');
-const { pickPdfScenarioWithLlm } = require('./pdf_scenario_llm_picker');
+const {
+    computeQualityScore,
+    scenarioAutoApplyDecision,
+} = require('./pdf_scenario_quality');
 const { extractLayoutFromScenario } = require('./pdf_parse_scenario_coords');
 const { pageDataStartToGridDataStart } = require('./pdf_grid_preview_utils');
 const {
@@ -27,6 +31,8 @@ const {
     findSectionRowIndex,
 } = require('./pdfjs_table_grid_extract');
 const { SECTION_DEFS } = require('./pdf_section_anchors');
+
+const SCENARIO_LIST_STATUSES = ['approved', 'active', 'tested'];
 
 const BUILTIN_KINDS = new Set(['upd_ediweb', 'depo']);
 
@@ -131,6 +137,9 @@ function buildParseScenarioPayload({
             matchScore: c.matchScore,
             version: c.version,
             autoApply: c.autoApply,
+            qualityScore: c.qualityScore ?? null,
+            qualityMode: c.qualityMode ?? null,
+            qualityWarning: c.qualityWarning ?? false,
             markerHits: c.markerHits,
         })),
         llmSuggestion,
@@ -226,12 +235,15 @@ async function resolvePdfParseScenario(pool, buffer, pdfProbe, options = {}) {
     let candidates = [];
     if (pool) {
         try {
-            const exact = await findByStructuralFp(pool, signals.structuralFp);
+            const exact = await findByStructuralFp(pool, signals.structuralFp, {
+                statuses: SCENARIO_LIST_STATUSES,
+            });
             const listed = await listPdfParseScenarios(pool, {
                 docKind: signals.docKind,
                 brokerSubtype: signals.brokerSubtype,
                 sectionId: signals.sectionId,
                 looseDocKind: looseKind,
+                statuses: SCENARIO_LIST_STATUSES,
             });
 
             const seen = new Set();
@@ -240,7 +252,14 @@ async function resolvePdfParseScenario(pool, buffer, pdfProbe, options = {}) {
                 if (!row || seen.has(row.id)) continue;
                 seen.add(row.id);
                 const scored = scoreScenarioMatch(signals, row);
-                const autoApply = isScenarioAutoApplicable(scored, row);
+                const quality = computeQualityScore({
+                    signals,
+                    scenarioRow: row,
+                    gridTable: null,
+                });
+                const qualityDecision = scenarioAutoApplyDecision(quality.quality_score, row.status);
+                const autoApply =
+                    isScenarioAutoApplicable(scored, row) && qualityDecision.apply;
                 merged.push({
                     id: row.id,
                     name: row.name,
@@ -251,6 +270,9 @@ async function resolvePdfParseScenario(pool, buffer, pdfProbe, options = {}) {
                     sectionId: row.sectionId,
                     matchScore: scored.score,
                     autoApply,
+                    qualityScore: quality.quality_score,
+                    qualityMode: qualityDecision.mode,
+                    qualityWarning: qualityDecision.warning || false,
                     markerHits: scored.markerHits,
                     ruleJson: row.ruleJson,
                 });

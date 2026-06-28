@@ -1,0 +1,23 @@
+{
+  "parser_version": "pdf-grid-v2.2",
+  "cases": [
+    {
+      "id": "logistics_sklad",
+      "file": "../../docs/test-pdf-upload/05_unknown_logistics_sklad.pdf",
+      "page": 1,
+      "min_rows": 2,
+      "min_columns": 3,
+      "expect_isin": false,
+      "notes": "логистика — маршрут/отправитель/получатель"
+    },
+    {
+      "id": "depo_vostok",
+      "file": "../../docs/test-pdf-upload/04_depo_vostok_strong.pdf",
+      "page": 1,
+      "min_rows": 2,
+      "min_columns": 4,
+      "expect_isin": true,
+      "notes": "депо с ISIN"
+    }
+  ]
+}

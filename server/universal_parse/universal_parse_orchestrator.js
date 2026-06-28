@@ -25,6 +25,8 @@ const { resolvePdfParseScenario, extractWithPdfParseScenario, hasTabularGridLayo
 const { diagnoseGridExtract } = require('./pdf_grid_diagnostics');
 const { buildPdfParseValidationReport } = require('../pdf_parse_validation_report');
 const { comparePdfDualExtract } = require('./pdf_dual_extract');
+const { computeGridDiff } = require('./pdf_grid_diff');
+const { PARSER_VERSION } = require('./pdf_probe_words');
 const {
     HIGH_CONFIDENCE,
     IMPORT_MIN_CONFIDENCE,
@@ -81,7 +83,7 @@ function applyForcedPdfKind(probe, orchestratorAnswers = {}) {
     };
 }
 
-async function importTableToSnapshot(pool, { file, projectId, scenarioId, headers, rows, sheetName = null }) {
+async function importTableToSnapshot(pool, { file, projectId, scenarioId, headers, rows, sheetName = null, tableMeta = null }) {
     const store = createParseSnapshotStore(pool);
     const sid = await store.createSnapshot({
         projectId: projectId ? parseInt(projectId, 10) : null,
@@ -89,6 +91,7 @@ async function importTableToSnapshot(pool, { file, projectId, scenarioId, header
         sheetName,
         scenarioId,
         headers,
+        tableMeta,
         status: 'parsing',
     });
     const rowCount = await store.importParsedRows(sid, headers, rows);
@@ -96,6 +99,7 @@ async function importTableToSnapshot(pool, { file, projectId, scenarioId, header
         snapshotId: sid,
         parsePreview: { headers, rows: rows.slice(0, 200), rowCount },
         rowCount,
+        tableMeta,
     };
 }
 
@@ -127,6 +131,10 @@ function buildResponse(base) {
     if (base.validationReport) out.validationReport = base.validationReport;
     if (base.needsScenarioChoice) out.needsScenarioChoice = true;
     if (base.candidates) out.candidates = base.candidates;
+    if (base.gridDiff) out.gridDiff = base.gridDiff;
+    if (base.parserVersion) out.parserVersion = base.parserVersion;
+    if (base.scenarioVersion != null) out.scenarioVersion = base.scenarioVersion;
+    if (base.qualityScore != null) out.qualityScore = base.qualityScore;
     return out;
 }
 
@@ -190,6 +198,7 @@ async function finalizePdfTable(ctx, params) {
         dualExtract,
         savedScenarioFound,
         expectedColumnCount,
+        gridDiff,
         withScenario,
         baseResponse,
     } = params;
@@ -232,6 +241,7 @@ async function finalizePdfTable(ctx, params) {
             meta,
             engine,
             gridDiagnostics,
+            gridDiff,
             validationReport,
             needsConfirm: true,
             warnings: validationReport.checks.filter((c) => c.status !== 'pass').map((c) => c.detail || c.title),
@@ -260,8 +270,11 @@ async function finalizePdfTable(ctx, params) {
         meta,
         engine,
         gridDiagnostics,
+        gridDiff,
         validationReport,
         needsConfirm,
+        parserVersion: meta?.parser_version || PARSER_VERSION,
+        scenarioVersion: meta?.scenario_version ?? null,
         assistantMessage: baseResponse?.assistantMessage,
     };
     return withScenario ? withScenario(response) : buildResponse(response);
@@ -587,17 +600,32 @@ async function parsePdfUniversal(ctx) {
 
     if (useGridPath) {
         let gridTable = null;
+        let gridDiff = null;
         const autoGrid = await extractTableGridFromPdf(file.buffer);
         if (bestPdfScenario) {
             const scenarioGrid = await extractWithPdfParseScenario(bestPdfScenario, file.buffer);
             const autoCols = autoGrid?.headers?.length || 0;
             const scenCols = scenarioGrid?.headers?.length || 0;
+            if (autoGrid?.ok && scenarioGrid?.ok) {
+                gridDiff = computeGridDiff(autoGrid, scenarioGrid, {
+                    scenarioId: bestPdfScenario.id,
+                    scenarioName: bestPdfScenario.name,
+                    scenarioVersion: bestPdfScenario.version,
+                    columnCount: autoCols,
+                });
+            }
             const scenarioUsable =
                 scenarioGrid?.ok &&
                 scenarioGrid.rows?.length &&
                 isReasonableGridTable(scenarioGrid) &&
                 (autoCols < 2 || scenCols >= autoCols - 1);
-            gridTable = scenarioUsable ? scenarioGrid : autoGrid;
+            if (gridDiff?.recommendedSource === 'scenario' && scenarioUsable) {
+                gridTable = scenarioGrid;
+            } else if (gridDiff?.recommendedSource === 'auto' && autoGrid?.ok && autoGrid.rows?.length) {
+                gridTable = autoGrid;
+            } else {
+                gridTable = scenarioUsable ? scenarioGrid : autoGrid;
+            }
         }
         if (!gridTable?.ok || !gridTable?.rows?.length) {
             gridTable = autoGrid?.ok && autoGrid.rows?.length ? autoGrid : await extractTableGridFromPdf(file.buffer);
@@ -624,9 +652,13 @@ async function parsePdfUniversal(ctx) {
                 meta: {
                     extractMethod: gridTable.method,
                     pdfParseScenarioId: bestPdfScenario?.id || null,
+                    parser_version: PARSER_VERSION,
+                    scenario_version: bestPdfScenario?.version ?? null,
+                    gridDiff,
                 },
                 engine: bestPdfScenario ? 'pdfjs_grid_scenario_v3' : 'pdfjs_grid',
                 gridDiagnostics: diagnostics,
+                gridDiff,
                 dualExtract,
                 savedScenarioFound,
                 expectedColumnCount: gridTable.headers?.length,
@@ -805,29 +837,99 @@ async function parseUniversal(input) {
 
 /**
  * Импорт черновика PDF в snapshot после confirm в UI.
+ * Если переданы gridSettings — бэк сам пересобирает таблицу (source of truth).
  */
-async function confirmPdfDraft(pool, { file, projectId, scenarioId, headers, rows, sheetName = null }) {
+async function confirmPdfDraft(pool, ctx = {}) {
+    const {
+        file,
+        projectId,
+        scenarioId,
+        headers,
+        rows,
+        sheetName = null,
+        gridSettings = null,
+        scenarioRow = null,
+    } = ctx;
     if (!pool) return { ok: false, errors: ['pool required'] };
     if (!file?.buffer) return { ok: false, errors: ['file.buffer required'] };
-    if (!Array.isArray(headers) || headers.length < 1) {
+
+    let finalHeaders = headers;
+    let finalRows = rows;
+    let tableMeta = null;
+    let quality = null;
+    let warnings = [];
+
+    const hasGridSettings =
+        gridSettings &&
+        Array.isArray(gridSettings.column_centers_norm) &&
+        gridSettings.column_centers_norm.length >= 2;
+
+    if (hasGridSettings) {
+        const { extractWithQuality, buildSnapshotMeta } = require('./pdf_grid_slice');
+        const { getPdfParseScenarioById, recordPdfScenarioOutcome } = require('./pdf_parse_scenario_store');
+        let scenario = scenarioRow;
+        const pdfScenarioId =
+            gridSettings.pdf_scenario_id ||
+            gridSettings.scenario_id ||
+            gridSettings.pdfScenarioId;
+        if (!scenario && pdfScenarioId && pool) {
+            scenario = await getPdfParseScenarioById(pool, pdfScenarioId);
+        }
+        const extractResult = await extractWithQuality(file.buffer, gridSettings, scenario, null);
+        if (!extractResult.ok || !extractResult.rows?.length) {
+            if (pdfScenarioId && pool) {
+                try {
+                    await recordPdfScenarioOutcome(pool, pdfScenarioId, { success: false });
+                } catch {
+                    /* non-fatal */
+                }
+            }
+            return {
+                ok: false,
+                errors: extractResult.warnings?.length
+                    ? extractResult.warnings
+                    : ['Не удалось собрать таблицу по настройкам колонок'],
+            };
+        }
+        finalHeaders = extractResult.headers;
+        finalRows = extractResult.rows;
+        quality = extractResult.quality;
+        warnings = extractResult.warnings || [];
+        tableMeta = buildSnapshotMeta(extractResult, gridSettings, quality);
+        if (pdfScenarioId && pool) {
+            try {
+                await recordPdfScenarioOutcome(pool, pdfScenarioId, { success: true });
+            } catch {
+                /* non-fatal */
+            }
+        }
+    }
+
+    if (!Array.isArray(finalHeaders) || finalHeaders.length < 1) {
         return { ok: false, errors: ['headers required'] };
     }
-    if (!Array.isArray(rows) || rows.length < 1) {
+    if (!Array.isArray(finalRows) || finalRows.length < 1) {
         return { ok: false, errors: ['rows required'] };
     }
+
     const imported = await importTableToSnapshot(pool, {
         file,
         projectId,
         scenarioId: scenarioId || 'pdf_extracted',
-        headers,
-        rows,
+        headers: finalHeaders,
+        rows: finalRows,
         sheetName,
+        tableMeta,
     });
     return {
         ok: true,
         snapshotId: imported.snapshotId,
         parsePreview: imported.parsePreview,
         rowCount: imported.rowCount,
+        tableMeta,
+        quality_score: quality?.quality_score ?? null,
+        warnings,
+        parser_version: tableMeta?.parser_version || null,
     };
 }
 

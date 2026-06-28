@@ -98,11 +98,19 @@ function hashesFromRule(rule) {
 
 async function listPdfParseScenarios(
     pool,
-    { projectId, docKind, brokerSubtype, sectionId, status = 'active', looseDocKind = false } = {}
+    { projectId, docKind, brokerSubtype, sectionId, status = 'active', statuses = null, looseDocKind = false } = {}
 ) {
-    const clauses = ['status = $1'];
-    const params = [status];
-    let idx = 2;
+    const clauses = [];
+    const params = [];
+    let idx = 1;
+
+    if (statuses?.length) {
+        clauses.push(`status = ANY($${idx++})`);
+        params.push(statuses);
+    } else {
+        clauses.push(`status = $${idx++}`);
+        params.push(status);
+    }
 
     const kind = docKind && docKind !== 'unknown' ? docKind : null;
     if (kind && !looseDocKind) {
@@ -170,6 +178,17 @@ async function savePdfParseScenario(pool, { projectId, rule, status = 'active', 
     return { ok: true, scenario: rowToScenario(res.rows[0]) };
 }
 
+async function updatePdfParseScenarioStatus(pool, id, status) {
+    const res = await pool.query(
+        `UPDATE pdf_parse_scenarios
+         SET status = $2, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1
+         RETURNING *`,
+        [id, status]
+    );
+    return rowToScenario(res.rows[0]);
+}
+
 async function bumpPdfParseScenarioHit(pool, id) {
     await pool.query(
         `UPDATE pdf_parse_scenarios
@@ -181,7 +200,17 @@ async function bumpPdfParseScenarioHit(pool, id) {
     );
 }
 
-async function findByStructuralFp(pool, structuralFp, { status = 'active' } = {}) {
+async function findByStructuralFp(pool, structuralFp, { status = 'active', statuses = null } = {}) {
+    if (statuses?.length) {
+        const res = await pool.query(
+            `SELECT * FROM pdf_parse_scenarios
+             WHERE structural_fp = $1 AND status = ANY($2)
+             ORDER BY hit_count DESC, updated_at DESC
+             LIMIT 5`,
+            [structuralFp, statuses]
+        );
+        return res.rows.map(rowToScenario);
+    }
     const res = await pool.query(
         `SELECT * FROM pdf_parse_scenarios
          WHERE structural_fp = $1 AND status = $2
@@ -190,6 +219,29 @@ async function findByStructuralFp(pool, structuralFp, { status = 'active' } = {}
         [structuralFp, status]
     );
     return res.rows.map(rowToScenario);
+}
+
+async function recordPdfScenarioOutcome(pool, id, { success = true } = {}) {
+    if (!pool || !id) return;
+    const row = await getPdfParseScenarioById(pool, id);
+    if (!row) return;
+    const rule = { ...(row.ruleJson || {}) };
+    rule.stats = rule.stats || {};
+    if (success) {
+        rule.stats.success_count = Number(rule.stats.success_count || 0) + 1;
+    } else {
+        rule.stats.failure_count = Number(rule.stats.failure_count || 0) + 1;
+    }
+    let nextStatus = row.status;
+    const failures = rule.stats.failure_count;
+    if (failures >= 3) nextStatus = 'suspended';
+    else if (success && row.status === 'draft') nextStatus = 'tested';
+    await pool.query(
+        `UPDATE pdf_parse_scenarios
+         SET rule_json = $2::jsonb, status = $3, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [id, JSON.stringify(rule), nextStatus]
+    );
 }
 
 module.exports = {
@@ -201,4 +253,6 @@ module.exports = {
     savePdfParseScenario,
     bumpPdfParseScenarioHit,
     findByStructuralFp,
+    recordPdfScenarioOutcome,
+    updatePdfParseScenarioStatus,
 };

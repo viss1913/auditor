@@ -431,6 +431,9 @@ async function buildUniversalAutostartResponse(file, routed, { projectId, userMe
             engine: result.engine,
             scenarioResolution: result.scenarioResolution || null,
             gridDiagnostics: result.gridDiagnostics || null,
+            gridDiff: result.gridDiff || null,
+            parserVersion: result.parserVersion || result.meta?.parser_version || null,
+            scenarioVersion: result.scenarioVersion ?? result.meta?.scenario_version ?? null,
             validationReport: result.validationReport || null,
         };
     }
@@ -462,9 +465,19 @@ async function buildUniversalAutostartResponse(file, routed, { projectId, userMe
               ? [{ id: 'pdf_kind_choice', text: 'Выбери тип PDF-документа.' }]
               : [],
         currentQuestion: result.needsConfirm
-            ? { id: 'confirm_parse' }
+            ? {
+                  id: 'confirm_parse',
+                  promptTemplate:
+                      result.assistantMessage ||
+                      'Подтверди результат парсинга или уточни поля в чате.',
+              }
             : result.needsScenarioChoice
-              ? { id: 'pdf_kind_choice' }
+              ? {
+                    id: 'pdf_kind_choice',
+                    promptTemplate:
+                        result.assistantMessage ||
+                        'Не могу однозначно определить тип PDF. Выбери кнопкой ниже.',
+                }
               : null,
         sessionState: {
             step: result.needsConfirm ? 'confirm' : result.needsScenarioChoice ? 'pick_scenario' : 'ready',
@@ -475,6 +488,9 @@ async function buildUniversalAutostartResponse(file, routed, { projectId, userMe
         engine: result.engine,
         scenarioResolution: result.scenarioResolution || null,
         gridDiagnostics: result.gridDiagnostics || null,
+        gridDiff: result.gridDiff || null,
+        parserVersion: result.parserVersion || result.meta?.parser_version || null,
+        scenarioVersion: result.scenarioVersion ?? result.meta?.scenario_version ?? null,
         validationReport: result.validationReport || null,
     };
 }
@@ -497,37 +513,7 @@ async function respondUniversalPdfAutostart(
         return res.status(422).json({ error: (session.errors || ['Ошибка парсинга PDF']).join('; ') });
     }
 
-    if (chatSessionId && session.snapshotId) {
-        if (session.multiSheet && Array.isArray(session.snapshots)) {
-            for (const snap of session.snapshots) {
-                if (!snap.snapshotId) continue;
-                await maybeLinkSnapshotToChat({
-                    chatSessionId,
-                    snapshotId: snap.snapshotId,
-                    projectId,
-                    label: snap.label || snap.sheetName || sourceFile.originalname,
-                });
-            }
-        } else {
-            await maybeLinkSnapshotToChat({
-                chatSessionId,
-                snapshotId: session.snapshotId,
-                projectId,
-                label: sourceFile.originalname,
-            });
-        }
-    }
-    if (chatSessionId && session.assistantMessage) {
-        await logChatExchange({
-            chatSessionId,
-            projectId,
-            snapshotId: session.snapshotId,
-            userMessage: userMessage || '(старт парса)',
-            assistantMessage: session.assistantMessage,
-        });
-    }
-
-    return res.json({
+    const body = {
         ok: true,
         rule: session.rule,
         snapshotId: session.snapshotId,
@@ -555,7 +541,48 @@ async function respondUniversalPdfAutostart(
         validationReport: session.validationReport || null,
         gridDiagnostics: session.gridDiagnostics || null,
         scenarioResolution: session.scenarioResolution || null,
-    });
+        sourceFileName: sourceFile.originalname || sourceFile.name || null,
+        sourceInboxPath: sourceFile.relativePath || null,
+    };
+
+    safeResJson(res, body);
+
+    if (!chatSessionId) return;
+
+    const runSideEffects = async () => {
+        if (session.snapshotId) {
+            if (session.multiSheet && Array.isArray(session.snapshots)) {
+                for (const snap of session.snapshots) {
+                    if (!snap.snapshotId) continue;
+                    await maybeLinkSnapshotToChat({
+                        chatSessionId,
+                        snapshotId: snap.snapshotId,
+                        projectId,
+                        label: snap.label || snap.sheetName || sourceFile.originalname,
+                    });
+                }
+            } else {
+                await maybeLinkSnapshotToChat({
+                    chatSessionId,
+                    snapshotId: session.snapshotId,
+                    projectId,
+                    label: sourceFile.originalname,
+                });
+            }
+        }
+        if (session.assistantMessage) {
+            await logChatExchange({
+                chatSessionId,
+                projectId,
+                snapshotId: session.snapshotId,
+                userMessage: userMessage || '(старт парса)',
+                assistantMessage: session.assistantMessage,
+            });
+        }
+    };
+    const side = () => runSideEffects().catch((e) => console.error('[pdf-autostart-side]', e.message));
+    if (res.writableFinished) side();
+    else res.once('finish', side);
 }
 
 async function applyStructureAutostartToBatch({
@@ -4027,7 +4054,7 @@ router.post('/ai/generate-rule-from-file', upload.single('file'), fixUploadNames
     }
 });
 
-registerPdfParseScenarioRoutes(router, { pool });
+registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat });
 
 registerInboxRoutes(router, {
     pool,

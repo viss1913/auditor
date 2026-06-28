@@ -133,9 +133,13 @@ function scoreScenarioMatch(fileSignals, scenarioRow) {
     return { score, markerHits, headerSim, colMatch, pageMatch, centerSim };
 }
 
+const { APPLICABLE_STATUSES } = require('./pdf_scenario_quality');
+
 /** Сценарий можно автоприменить при повторной загрузке того же макета. */
 function isScenarioAutoApplicable(scored, scenarioRow) {
     if (!scored || scored.score < 0.55) return false;
+    const st = String(scenarioRow?.status || 'active').toLowerCase();
+    if (!APPLICABLE_STATUSES.has(st)) return false;
     const rule = scenarioRow?.rule_json || scenarioRow?.ruleJson || {};
     const markers = rule.detection?.markers || [];
     const minHits = rule.detection?.min_marker_hits ?? 1;

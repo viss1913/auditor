@@ -260,13 +260,23 @@ async function extractSectionTableGrid(buffer, sectionDef, allSectionDefs, broke
                 pageHint: bounds.sectionPage,
             });
             if (structure.headers?.length >= 2 && (structure.confidence || 0) >= 0.5) {
+                // Vision только для подписей колонок — координаты и строки не трогаем.
                 const retry = extractTableFromRows(rows, bounds.startIdx, bounds.endIdx, {
                     ...gridOpts,
                     visionHeaders: structure.headers,
                     targetColumnCount: structure.columnCount || structure.headers.length,
                     method: 'pdfjs_grid_vision_headers',
+                    visionLayoutOnly: true,
                 });
-                if (retry.ok && retry.rows.length) extracted = retry;
+                if (retry.ok && retry.rows.length) {
+                    extracted = {
+                        ...retry,
+                        meta: {
+                            ...(retry.meta || {}),
+                            visionUsedFor: 'headers_only',
+                        },
+                    };
+                }
             }
         } catch (err) {
             if (process.env.BROKER_PDF_VISION_DEBUG === '1') {

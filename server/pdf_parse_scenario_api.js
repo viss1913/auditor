@@ -4,6 +4,7 @@ const {
     listPdfParseScenarios,
     getPdfParseScenarioById,
     savePdfParseScenario,
+    updatePdfParseScenarioStatus,
 } = require('./universal_parse/pdf_parse_scenario_store');
 const { resolvePdfParseScenario } = require('./universal_parse/resolve_pdf_parse_scenario');
 const { ensureMinMarkers } = require('./universal_parse/pdf_scenario_markers');
@@ -43,6 +44,9 @@ const {
     suggestBrokerHeaderFields,
     validateHeaderFieldDefs,
 } = require('./universal_parse/pdf_header_fields');
+const { buildPdfProbeWords, fileHash: pdfFileHash } = require('./universal_parse/pdf_probe_words');
+const { computeGridDiff } = require('./universal_parse/pdf_grid_diff');
+const { extractGridBySettings } = require('./universal_parse/pdf_grid_slice');
 
 const memUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 const memUploadAny = memUpload.any();
@@ -112,6 +116,37 @@ function resolvePdfBufferFromJsonBody(req) {
     return null;
 }
 
+function parseGridSettingsFromBody(body = {}) {
+    let columnCentersNorm = body.column_centers_norm || body.columnCentersNorm;
+    if (typeof columnCentersNorm === 'string') {
+        columnCentersNorm = JSON.parse(columnCentersNorm || '[]');
+    }
+    const dataStart =
+        body.data_start_row != null
+            ? parseInt(body.data_start_row, 10)
+            : body.dataStartRow != null
+              ? parseInt(body.dataStartRow, 10)
+              : undefined;
+    let headers = body.headers;
+    if (typeof headers === 'string') headers = JSON.parse(headers || '[]');
+    return {
+        column_centers_norm: columnCentersNorm,
+        data_start_row: dataStart,
+        page: parseInt(body.page || '1', 10) || 1,
+        page_width_pt: parseFloat(body.page_width_pt || body.pageWidthPt || '595.28'),
+        x_tol_norm: parseFloat(body.x_tol_norm || '0.02'),
+        headers: headers || [],
+        pdf_scenario_id:
+            body.pdf_scenario_id || body.pdfScenarioId || body.scenario_db_id || null,
+        scenario_id: body.scenario_id || body.scenarioId || null,
+        scenario_version: body.scenario_version || body.scenarioVersion || null,
+        section_id: body.section_id || body.sectionId || null,
+        section_start: body.section_start || body.sectionStart || null,
+        section_end: body.section_end || body.sectionEnd || null,
+        frontend_preview_hash: body.frontend_preview_hash || body.frontendPreviewHash || null,
+    };
+}
+
 function registerPdfParseConfirmRoute(router, path, middleware, { pool, maybeLinkSnapshotToChat }) {
     router.post(path, middleware, async (req, res) => {
         try {
@@ -121,13 +156,32 @@ function registerPdfParseConfirmRoute(router, path, middleware, { pool, maybeLin
                     error: 'Нужен PDF в поле file или inbox_path + chat_session_id',
                 });
             }
+            let gridSettings = null;
+            try {
+                gridSettings = parseGridSettingsFromBody(req.body);
+            } catch {
+                return res.status(400).json({ error: 'column_centers_norm должен быть JSON-массивом' });
+            }
+            const hasGridSettings =
+                Array.isArray(gridSettings.column_centers_norm) &&
+                gridSettings.column_centers_norm.length >= 2;
+
             let headers = [];
             let rows = [];
-            try {
-                ({ headers, rows } = parseHeadersRowsFromBody(req.body));
-            } catch {
-                return res.status(400).json({ error: 'headers и rows должны быть JSON' });
+            if (!hasGridSettings) {
+                try {
+                    ({ headers, rows } = parseHeadersRowsFromBody(req.body));
+                } catch {
+                    return res.status(400).json({ error: 'headers и rows должны быть JSON' });
+                }
+            } else if (req.body?.headers) {
+                try {
+                    ({ headers } = parseHeadersRowsFromBody(req.body));
+                } catch {
+                    headers = gridSettings.headers || [];
+                }
             }
+
             const result = await confirmPdfDraft(pool, {
                 file: { buffer: file.buffer, originalname: file.originalname || 'file.pdf' },
                 projectId: req.body?.project_id || req.body?.projectId || null,
@@ -135,6 +189,7 @@ function registerPdfParseConfirmRoute(router, path, middleware, { pool, maybeLin
                 headers,
                 rows,
                 sheetName: req.body?.sheet_name || req.body?.sheetName || null,
+                gridSettings: hasGridSettings ? gridSettings : null,
             });
             if (!result.ok) {
                 return res.status(400).json({ error: (result.errors || ['Ошибка confirm']).join('; ') });
@@ -209,6 +264,22 @@ function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat 
         }
     });
 
+    router.patch('/pdf-parse-scenarios/:id/status', async (req, res) => {
+        const allowed = new Set(['draft', 'tested', 'approved', 'active', 'suspended', 'rejected', 'archived']);
+        const nextStatus = String(req.body?.status || '').toLowerCase();
+        if (!allowed.has(nextStatus)) {
+            return res.status(400).json({ error: `status must be one of: ${[...allowed].join(', ')}` });
+        }
+        try {
+            const row = await getPdfParseScenarioById(pool, req.params.id);
+            if (!row) return res.status(404).json({ error: 'Сценарий не найден' });
+            const scenario = await updatePdfParseScenarioStatus(pool, row.id, nextStatus);
+            res.json({ scenario });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
     router.post('/pdf-parse-scenarios/match', memUploadAny, async (req, res) => {
         try {
             const file = pickMulterFile(req);
@@ -222,6 +293,28 @@ function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat 
                 fileName: file.originalname || '',
             });
             res.json(resolution);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    router.post('/pdf-probe-words', memUploadAny, async (req, res) => {
+        try {
+            const file = resolvePdfBufferFromRequest(req);
+            if (!file?.buffer?.length) {
+                return res.status(400).json({ error: 'Нужен PDF в поле file или inbox_path + chat_session_id' });
+            }
+            const page = parseInt(req.body?.page || '1', 10) || 1;
+            const documentId =
+                String(req.body?.document_id || req.body?.inbox_path || req.body?.inboxPath || '').trim() ||
+                file.originalname ||
+                '';
+            const payload = await buildPdfProbeWords(file.buffer, {
+                page,
+                documentId,
+                fileHash: pdfFileHash(file.buffer),
+            });
+            res.json({ ok: true, ...payload });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -294,6 +387,10 @@ function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat 
             let similarScenarioHeaders = null;
             let similarScenarioDataStartRow = null;
             let similarScenarioHeaderFields = null;
+            let similarScenarioId = null;
+            let similarScenarioVersion = null;
+            let scenarioPreviewRows = null;
+            let gridDiff = null;
             if (pool) {
                 try {
                     const pdfProbe = await probePdfKind(file.buffer, file.originalname || '');
@@ -309,6 +406,8 @@ function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat 
                     if (scenarioId && (parseSc?.status === 'found' || parseSc?.status === 'similar')) {
                         const row = await getPdfParseScenarioById(pool, scenarioId);
                         if (row?.ruleJson || row?.rule_json) {
+                            similarScenarioId = row.id;
+                            similarScenarioVersion = row.version;
                             const rule = row.ruleJson || row.rule_json;
                             const layout = extractLayoutFromScenario(rule, metrics.pageWidthPt);
                             if (layout.columnCenters?.length >= 2) {
@@ -323,12 +422,43 @@ function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat 
                                 similarScenarioHeaderFields = rule.header_fields?.length
                                     ? rule.header_fields
                                     : null;
+                                try {
+                                    const scenExtract = await extractGridBySettings(file.buffer, {
+                                        column_centers_norm: similarScenarioCentersNorm,
+                                        data_start_row: similarScenarioDataStartRow ?? suggestedDataStartRow,
+                                        page_width_pt: metrics.pageWidthPt,
+                                        headers: similarScenarioHeaders || [],
+                                        page,
+                                    });
+                                    if (scenExtract.ok) {
+                                        scenarioPreviewRows = (scenExtract.rows || []).slice(0, 30);
+                                    }
+                                } catch {
+                                    /* non-fatal */
+                                }
                             }
                         }
                     }
                 } catch {
                     /* non-fatal */
                 }
+            }
+
+            if (grid.ok && scenarioPreviewRows?.length) {
+                gridDiff = computeGridDiff(
+                    { headers: previewHeadersOut, rows: previewRowsOut, confidence: grid.confidence },
+                    {
+                        headers: similarScenarioHeaders || previewHeadersOut,
+                        rows: scenarioPreviewRows,
+                        confidence: grid.confidence,
+                    },
+                    {
+                        scenarioId: similarScenarioId,
+                        scenarioName: similarScenarioName,
+                        scenarioVersion: similarScenarioVersion,
+                        columnCount: grid.headers?.length || 0,
+                    }
+                );
             }
 
             res.json({
@@ -356,6 +486,10 @@ function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat 
                 similarScenarioHeaders,
                 similarScenarioDataStartRow,
                 similarScenarioHeaderFields,
+                similarScenarioId,
+                similarScenarioVersion,
+                scenarioPreviewRows,
+                gridDiff,
                 headers: previewHeadersOut,
                 previewRows: previewRowsOut,
                 confidence: grid.confidence || 0,
@@ -619,7 +753,7 @@ function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat 
         try {
             const saved = await savePdfParseScenario(pool, {
                 rule,
-                status: 'active',
+                status: 'draft',
             });
             if (!saved.ok) return res.status(400).json({ error: saved.errors.join('; ') });
             console.log(
@@ -647,13 +781,26 @@ function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat 
                     error: 'Нужен inbox_path + chat_session_id (или file в multipart)',
                 });
             }
+            let gridSettings = null;
+            try {
+                gridSettings = parseGridSettingsFromBody(req.body);
+            } catch {
+                return res.status(400).json({ error: 'column_centers_norm должен быть JSON-массивом' });
+            }
+            const hasGridSettings =
+                Array.isArray(gridSettings.column_centers_norm) &&
+                gridSettings.column_centers_norm.length >= 2;
+
             let headers = [];
             let rows = [];
-            try {
-                ({ headers, rows } = parseHeadersRowsFromBody(req.body));
-            } catch {
-                return res.status(400).json({ error: 'headers и rows должны быть JSON' });
+            if (!hasGridSettings) {
+                try {
+                    ({ headers, rows } = parseHeadersRowsFromBody(req.body));
+                } catch {
+                    return res.status(400).json({ error: 'headers и rows должны быть JSON' });
+                }
             }
+
             const result = await confirmPdfDraft(pool, {
                 file: { buffer: file.buffer, originalname: file.originalname || 'file.pdf' },
                 projectId: req.body?.project_id || req.body?.projectId || null,
@@ -661,6 +808,7 @@ function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat 
                 headers,
                 rows,
                 sheetName: req.body?.sheet_name || req.body?.sheetName || null,
+                gridSettings: hasGridSettings ? gridSettings : null,
             });
             if (!result.ok) {
                 return res.status(400).json({ error: (result.errors || ['Ошибка confirm']).join('; ') });
