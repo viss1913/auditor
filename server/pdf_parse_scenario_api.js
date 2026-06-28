@@ -427,12 +427,20 @@ function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat 
             const metrics = await getPdfPageMetrics(file.buffer, page);
             const columnCenters = centersFromNorm(columnCentersNorm, metrics.pageWidthPt);
             const xTol = xTolFromNorm(parseFloat(req.body?.x_tol_norm || '0.02'), metrics.pageWidthPt);
+            const { items: pageItems } = await extractTextItems(file.buffer, [page]);
+            const pageRows = clusterRows(pageItems);
+            const suggestedPageStart = suggestDataStartRow(pageRows);
             const pageDataStart =
                 req.body?.data_start != null ? parseInt(req.body.data_start, 10) : undefined;
-            const gridDataStart =
-                pageDataStart != null && Number.isFinite(pageDataStart)
-                    ? pageDataStartToGridDataStart(pageDataStart, 0)
-                    : undefined;
+            let gridDataStart;
+            if (pageDataStart != null && Number.isFinite(pageDataStart) && pageDataStart > 0) {
+                gridDataStart = pageDataStartToGridDataStart(pageDataStart, 0);
+            } else {
+                gridDataStart =
+                    suggestedPageStart > 0
+                        ? pageDataStartToGridDataStart(suggestedPageStart, 0)
+                        : undefined;
+            }
 
             const gridOpts = {
                 columnCenters,
@@ -451,7 +459,12 @@ function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat 
             } catch {
                 headers = [];
             }
-            if (headers.length) gridOpts.visionHeaders = headers;
+            const tableHeadersOnly = headerFieldDefs.length
+                ? headers.filter(
+                      (h) => !headerFieldDefs.some((f) => f.label === h || f.target === h)
+                  )
+                : headers;
+            if (tableHeadersOnly.length) gridOpts.visionHeaders = tableHeadersOnly;
 
             const grid = await extractTableGridFromPdf(file.buffer, gridOpts);
             const diagnostics = diagnoseGridExtract(grid, columnCentersNorm.length);
