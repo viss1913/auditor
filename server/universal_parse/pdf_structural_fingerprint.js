@@ -53,6 +53,20 @@ function countMarkerHits(text, markers) {
     return hits;
 }
 
+function centerNormSimilarity(fileCentersNorm, ruleColumns) {
+    const saved = (ruleColumns || [])
+        .map((c) => Number(c.center_norm))
+        .filter((n) => Number.isFinite(n));
+    const file = (fileCentersNorm || []).map(Number).filter((n) => Number.isFinite(n));
+    if (!saved.length || !file.length) return 0.5;
+    const n = Math.min(saved.length, file.length);
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+        sum += 1 - Math.min(1, Math.abs(saved[i] - file[i]) / 0.08);
+    }
+    return sum / n;
+}
+
 function headerSimilarity(sampleA, sampleB) {
     const a = (sampleA || []).map(normalizeHeaderText).filter(Boolean);
     const b = (sampleB || []).map(normalizeHeaderText).filter(Boolean);
@@ -78,10 +92,13 @@ function scoreScenarioMatch(fileSignals, scenarioRow) {
 
     const markerHits = countMarkerHits(fileSignals.text || '', markers);
     if (markers.length && markerHits < minHits) {
-        return { score: 0, markerHits, headerSim: 0, colMatch: 0, pageMatch: 0 };
+        return { score: 0, markerHits, headerSim: 0, colMatch: 0, pageMatch: 0, centerSim: 0 };
     }
 
-    const ruleHeaders = (rule.columns || []).map((c) => c.label || c.target);
+    const ruleHeaders =
+        rule.detection?.probe_at_save?.header_sample?.length > 0
+            ? rule.detection.probe_at_save.header_sample
+            : (rule.columns || []).map((c) => c.label || c.target);
     const headerSim = headerSimilarity(fileSignals.headerSample, ruleHeaders);
 
     const expectedCols =
@@ -100,11 +117,31 @@ function scoreScenarioMatch(fileSignals, scenarioRow) {
     const fileWidth = Math.round(Number(fileSignals.pageWidthPt || 595));
     const pageMatch = ruleWidth === fileWidth ? 1 : Math.abs(ruleWidth - fileWidth) <= 5 ? 0.8 : 0.5;
 
+    const centerSim = centerNormSimilarity(
+        fileSignals.columnCentersNorm,
+        rule.columns || []
+    );
+
     const markerScore = markers.length ? Math.min(1, markerHits / Math.max(1, minHits)) : 0.5;
     const score =
-        markerScore * 0.3 + headerSim * 0.4 + colMatch * 0.2 + pageMatch * 0.1;
+        markerScore * 0.25 +
+        headerSim * 0.3 +
+        colMatch * 0.15 +
+        pageMatch * 0.1 +
+        centerSim * 0.2;
 
-    return { score, markerHits, headerSim, colMatch, pageMatch };
+    return { score, markerHits, headerSim, colMatch, pageMatch, centerSim };
+}
+
+/** Сценарий можно автоприменить при повторной загрузке того же макета. */
+function isScenarioAutoApplicable(scored, scenarioRow) {
+    if (!scored || scored.score < 0.55) return false;
+    const rule = scenarioRow?.rule_json || scenarioRow?.ruleJson || {};
+    const markers = rule.detection?.markers || [];
+    const minHits = rule.detection?.min_marker_hits ?? 1;
+    if (markers.length && scored.markerHits >= minHits) return true;
+    if ((scored.centerSim ?? 0) >= 0.85 && (scored.colMatch ?? 0) >= 0.7) return true;
+    return scored.score >= 0.85;
 }
 
 function matchStatusFromScore(score) {
@@ -148,7 +185,9 @@ module.exports = {
     buildDetectionHash,
     countMarkerHits,
     headerSimilarity,
+    centerNormSimilarity,
     scoreScenarioMatch,
     matchStatusFromScore,
+    isScenarioAutoApplicable,
     getPdfPageMetrics,
 };

@@ -1,4 +1,4 @@
-const { validatePdfParseScenarioV3 } = require('../pdf_parse_scenario_v3_validate');
+const { validatePdfParseScenarioV3Full } = require('../pdf_parse_scenario_v3_validate');
 const {
     buildStructuralFingerprint,
     buildDetectionHash,
@@ -61,46 +61,67 @@ function metaFromRule(rule) {
     };
 }
 
+/** Синонимы doc_kind: в UI/catalog — broker_pdf, в probe — broker_report. */
+function docKindAliases(docKind) {
+    const k = String(docKind || '').trim();
+    if (!k || k === 'unknown') return null;
+    if (k === 'broker_pdf' || k === 'broker_report') return ['broker_pdf', 'broker_report'];
+    if (k === 'pdf_extracted' || k === 'unknown_pdf') return ['pdf_extracted', 'unknown_pdf'];
+    return [k];
+}
+
 function hashesFromRule(rule) {
     const meta = metaFromRule(rule);
-    const headers = (rule.columns || []).map((c) => c.label || c.target);
-    return {
-        structuralFp: buildStructuralFingerprint({
+    const probeAtSave = rule.detection?.probe_at_save;
+    const headers =
+        probeAtSave?.header_sample?.length > 0
+            ? probeAtSave.header_sample
+            : (rule.columns || []).map((c) => c.label || c.target);
+    const structuralFp =
+        probeAtSave?.structural_fp ||
+        buildStructuralFingerprint({
             docKind: meta.docKind,
             brokerSubtype: meta.brokerSubtype,
             sectionId: meta.sectionId,
-            columnCount: rule.columns?.length || rule.validation?.expected_column_count,
+            columnCount:
+                probeAtSave?.column_count ||
+                rule.columns?.length ||
+                rule.validation?.expected_column_count,
             pageWidthPt: rule.layout?.page_width_pt,
             headerSample: headers,
-        }),
+        });
+    return {
+        structuralFp,
         detectionHash: buildDetectionHash(rule.detection?.markers),
     };
 }
 
-async function listPdfParseScenarios(pool, { projectId, docKind, brokerSubtype, sectionId, status = 'active' } = {}) {
+async function listPdfParseScenarios(
+    pool,
+    { projectId, docKind, brokerSubtype, sectionId, status = 'active', looseDocKind = false } = {}
+) {
     const clauses = ['status = $1'];
     const params = [status];
     let idx = 2;
 
-    if (docKind) {
-        clauses.push(`doc_kind = $${idx++}`);
-        params.push(docKind);
+    const kind = docKind && docKind !== 'unknown' ? docKind : null;
+    if (kind && !looseDocKind) {
+        const aliases = docKindAliases(kind);
+        if (aliases?.length > 1) {
+            clauses.push(`(doc_kind = ANY($${idx++}) OR doc_kind IS NULL OR doc_kind = 'unknown')`);
+            params.push(aliases);
+        } else {
+            clauses.push(`(doc_kind = $${idx++} OR doc_kind IS NULL OR doc_kind = 'unknown')`);
+            params.push(kind);
+        }
     }
-    if (brokerSubtype) {
+    if (brokerSubtype && !looseDocKind) {
         clauses.push(`(broker_subtype = $${idx++} OR broker_subtype IS NULL)`);
         params.push(brokerSubtype);
     }
-    if (sectionId) {
+    if (sectionId && !looseDocKind) {
         clauses.push(`(section_id = $${idx++} OR section_id IS NULL)`);
         params.push(sectionId);
-    }
-
-    const pid = projectId != null ? parseInt(projectId, 10) : null;
-    if (Number.isFinite(pid)) {
-        clauses.push(`(project_id IS NULL OR project_id = $${idx++})`);
-        params.push(pid);
-    } else {
-        clauses.push('project_id IS NULL');
     }
 
     const sql = `
@@ -119,15 +140,13 @@ async function getPdfParseScenarioById(pool, id) {
 }
 
 async function savePdfParseScenario(pool, { projectId, rule, status = 'active', parentId = null, version = 1 }) {
-    const validated = validatePdfParseScenarioV3(rule);
+    const validated = validatePdfParseScenarioV3Full(rule);
     if (!validated.ok) {
         return { ok: false, errors: validated.errors };
     }
 
     const meta = metaFromRule(validated.rule);
     const { structuralFp, detectionHash } = hashesFromRule(validated.rule);
-    const pid = projectId != null && Number.isFinite(parseInt(projectId, 10)) ? parseInt(projectId, 10) : null;
-
     const res = await pool.query(
         `INSERT INTO pdf_parse_scenarios (
             project_id, name, doc_kind, broker_subtype, section_id,
@@ -135,7 +154,7 @@ async function savePdfParseScenario(pool, { projectId, rule, status = 'active', 
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         RETURNING *`,
         [
-            pid,
+            null,
             meta.name,
             meta.docKind,
             meta.brokerSubtype,
@@ -162,15 +181,13 @@ async function bumpPdfParseScenarioHit(pool, id) {
     );
 }
 
-async function findByStructuralFp(pool, structuralFp, { projectId, status = 'active' } = {}) {
-    const pid = projectId != null ? parseInt(projectId, 10) : null;
+async function findByStructuralFp(pool, structuralFp, { status = 'active' } = {}) {
     const res = await pool.query(
         `SELECT * FROM pdf_parse_scenarios
          WHERE structural_fp = $1 AND status = $2
-           AND ($3::int IS NULL OR project_id IS NULL OR project_id = $3)
          ORDER BY hit_count DESC, updated_at DESC
          LIMIT 5`,
-        [structuralFp, status, Number.isFinite(pid) ? pid : null]
+        [structuralFp, status]
     );
     return res.rows.map(rowToScenario);
 }

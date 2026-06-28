@@ -6,6 +6,7 @@ const {
     savePdfParseScenario,
 } = require('./universal_parse/pdf_parse_scenario_store');
 const { resolvePdfParseScenario } = require('./universal_parse/resolve_pdf_parse_scenario');
+const { ensureMinMarkers } = require('./universal_parse/pdf_scenario_markers');
 const { probePdfKind } = require('./pdf_probe');
 const {
     extractTextItems,
@@ -27,14 +28,137 @@ const {
 const { diagnoseGridExtract } = require('./universal_parse/pdf_grid_diagnostics');
 const { confirmPdfDraft } = require('./universal_parse/universal_parse_orchestrator');
 const { extractLayoutFromScenario } = require('./universal_parse/pdf_parse_scenario_coords');
+const { readInboxFileBuffer } = require('./project_inbox');
+const {
+    clusteredRowsForPreview,
+    suggestDataStartRow,
+    pageDataStartToGridDataStart,
+    inferColumnCentersFromPageRows,
+    inferColumnBoundaryNorms,
+} = require('./universal_parse/pdf_grid_preview_utils');
+const {
+    extractHeaderFields,
+    applyHeaderFieldsToRows,
+    parseHeaderFieldsFromBody,
+    suggestBrokerHeaderFields,
+    validateHeaderFieldDefs,
+} = require('./universal_parse/pdf_header_fields');
 
 const memUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+const memUploadAny = memUpload.any();
 
-function registerPdfParseScenarioRoutes(router, { pool }) {
+function pickMulterFile(req) {
+    if (req.file?.buffer?.length) return req.file;
+    return (req.files || []).find((f) => f.fieldname === 'file' && f.buffer?.length) || null;
+}
+
+function resolvePdfBufferFromRequest(req) {
+    const uploaded = pickMulterFile(req);
+    if (uploaded?.buffer?.length) {
+        return {
+            buffer: uploaded.buffer,
+            originalname: uploaded.originalname || 'file.pdf',
+        };
+    }
+    const inboxPath = String(req.body?.inbox_path || req.body?.inboxPath || '').trim();
+    const chatSessionId = parseInt(req.body?.chat_session_id || req.body?.chatSessionId || '0', 10);
+    if (inboxPath && Number.isFinite(chatSessionId) && chatSessionId > 0) {
+        try {
+            const loaded = readInboxFileBuffer(
+                { chatSessionId, userId: req.user?.id ?? null },
+                null,
+                inboxPath
+            );
+            if (loaded.buffer?.length) {
+                return { buffer: loaded.buffer, originalname: loaded.originalname };
+            }
+        } catch {
+            /* no file */
+        }
+    }
+    return null;
+}
+
+function parseHeadersRowsFromBody(body = {}) {
+    let headers = body.headers;
+    let rows = body.rows;
+    if (typeof headers === 'string') {
+        headers = JSON.parse(headers || '[]');
+    }
+    if (typeof rows === 'string') {
+        rows = JSON.parse(rows || '[]');
+    }
+    return { headers: headers || [], rows: rows || [] };
+}
+
+function resolvePdfBufferFromJsonBody(req) {
+    const body = req.body || {};
+    const inboxPath = String(body.inbox_path || body.inboxPath || '').trim();
+    const chatSessionId = parseInt(body.chat_session_id || body.chatSessionId || '0', 10);
+    if (inboxPath && Number.isFinite(chatSessionId) && chatSessionId > 0) {
+        try {
+            const loaded = readInboxFileBuffer(
+                { chatSessionId, userId: req.user?.id ?? null },
+                null,
+                inboxPath
+            );
+            if (loaded.buffer?.length) {
+                return { buffer: loaded.buffer, originalname: loaded.originalname };
+            }
+        } catch {
+            /* fall through */
+        }
+    }
+    return null;
+}
+
+function registerPdfParseConfirmRoute(router, path, middleware, { pool, maybeLinkSnapshotToChat }) {
+    router.post(path, middleware, async (req, res) => {
+        try {
+            const file = resolvePdfBufferFromRequest(req) || resolvePdfBufferFromJsonBody(req);
+            if (!file?.buffer?.length) {
+                return res.status(400).json({
+                    error: 'Нужен PDF в поле file или inbox_path + chat_session_id',
+                });
+            }
+            let headers = [];
+            let rows = [];
+            try {
+                ({ headers, rows } = parseHeadersRowsFromBody(req.body));
+            } catch {
+                return res.status(400).json({ error: 'headers и rows должны быть JSON' });
+            }
+            const result = await confirmPdfDraft(pool, {
+                file: { buffer: file.buffer, originalname: file.originalname || 'file.pdf' },
+                projectId: req.body?.project_id || req.body?.projectId || null,
+                scenarioId: req.body?.scenario_id || req.body?.scenarioId || 'pdf_extracted',
+                headers,
+                rows,
+                sheetName: req.body?.sheet_name || req.body?.sheetName || null,
+            });
+            if (!result.ok) {
+                return res.status(400).json({ error: (result.errors || ['Ошибка confirm']).join('; ') });
+            }
+            const chatSessionId = parseInt(req.body?.chat_session_id || req.body?.chatSessionId || '', 10);
+            if (maybeLinkSnapshotToChat && Number.isFinite(chatSessionId) && chatSessionId > 0 && result.snapshotId) {
+                await maybeLinkSnapshotToChat({
+                    chatSessionId,
+                    snapshotId: result.snapshotId,
+                    projectId: req.body?.project_id || req.body?.projectId || null,
+                    label: file.originalname || 'PDF',
+                });
+            }
+            res.json(result);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+}
+
+function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat }) {
     router.get('/pdf-parse-scenarios', async (req, res) => {
         try {
             const rows = await listPdfParseScenarios(pool, {
-                projectId: req.query.project_id,
                 docKind: req.query.doc_kind,
                 brokerSubtype: req.query.broker_subtype,
                 sectionId: req.query.section_id,
@@ -85,16 +209,17 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
         }
     });
 
-    router.post('/pdf-parse-scenarios/match', memUpload.single('file'), async (req, res) => {
+    router.post('/pdf-parse-scenarios/match', memUploadAny, async (req, res) => {
         try {
-            const file = req.file;
+            const file = pickMulterFile(req);
             if (!file?.buffer?.length) {
                 return res.status(400).json({ error: 'Нужен PDF в поле file' });
             }
             const pdfProbe = await probePdfKind(file.buffer, file.originalname || '');
             const resolution = await resolvePdfParseScenario(pool, file.buffer, pdfProbe, {
-                projectId: req.body?.project_id,
                 sectionId: req.body?.section_id,
+                forceScenarioId: req.body?.force_scenario_id || req.body?.forceScenarioId,
+                fileName: file.originalname || '',
             });
             res.json(resolution);
         } catch (err) {
@@ -102,11 +227,11 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
         }
     });
 
-    router.post('/pdf-grid-preview', memUpload.single('file'), async (req, res) => {
+    router.post('/pdf-grid-preview', memUploadAny, async (req, res) => {
         try {
-            const file = req.file;
+            const file = resolvePdfBufferFromRequest(req);
             if (!file?.buffer?.length) {
-                return res.status(400).json({ error: 'Нужен PDF в поле file' });
+                return res.status(400).json({ error: 'Нужен PDF в поле file или inbox_path + chat_session_id' });
             }
             const page = parseInt(req.body?.page || '1', 10) || 1;
             const metrics = await getPdfPageMetrics(file.buffer, page);
@@ -117,14 +242,58 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
             if (req.body?.section_end) gridOpts.anchorEnd = req.body.section_end;
             if (req.body?.section_id) gridOpts.sectionId = req.body.section_id;
 
-            const grid = await extractTableGridFromPdf(file.buffer, gridOpts);
+            const grid = await extractTableGridFromPdf(file.buffer, {
+                ...gridOpts,
+                pageRanges: [page],
+            });
             const { items } = await extractTextItems(file.buffer, [page]);
             const rows = clusterRows(items);
+            const clusteredRows = clusteredRowsForPreview(
+                rows,
+                metrics.pageWidthPt,
+                metrics.pageHeightPt
+            );
+            const suggestedDataStartRow = suggestDataStartRow(rows);
+            const suggestedHeaderFields = suggestBrokerHeaderFields(clusteredRows);
+            const suggestedHeaderFieldValues = extractHeaderFields(
+                rows,
+                suggestedDataStartRow,
+                suggestedHeaderFields
+            );
 
-            const autoNorm = centersToNorm(grid.meta?.columnCenters || [], metrics.pageWidthPt);
+            let previewRowsOut = (grid.rows || []).slice(0, 30);
+            let previewHeadersOut = grid.headers || [];
+            if (suggestedHeaderFields.length && previewRowsOut.length) {
+                const applied = applyHeaderFieldsToRows(
+                    previewRowsOut,
+                    previewHeadersOut,
+                    suggestedHeaderFieldValues,
+                    suggestedHeaderFields
+                );
+                previewRowsOut = applied.rows;
+                previewHeadersOut = applied.headers;
+            }
+
+            const autoCentersRaw =
+                grid.meta?.columnCenters?.length >= 2
+                    ? grid.meta.columnCenters
+                    : inferColumnCentersFromPageRows(rows, suggestedDataStartRow);
+            const autoNorm = centersToNorm(autoCentersRaw, metrics.pageWidthPt);
+            const headerColumnLeftsNorm = centersToNorm(
+                inferColumnCentersFromPageRows(rows, suggestedDataStartRow),
+                metrics.pageWidthPt
+            );
+            const columnBoundaryNorm = inferColumnBoundaryNorms(
+                rows,
+                suggestedDataStartRow,
+                metrics.pageWidthPt
+            );
 
             let similarScenarioCentersNorm = null;
             let similarScenarioName = null;
+            let similarScenarioHeaders = null;
+            let similarScenarioDataStartRow = null;
+            let similarScenarioHeaderFields = null;
             if (pool) {
                 try {
                     const pdfProbe = await probePdfKind(file.buffer, file.originalname || '');
@@ -140,16 +309,20 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
                     if (scenarioId && (parseSc?.status === 'found' || parseSc?.status === 'similar')) {
                         const row = await getPdfParseScenarioById(pool, scenarioId);
                         if (row?.ruleJson || row?.rule_json) {
-                            const layout = extractLayoutFromScenario(
-                                row.ruleJson || row.rule_json,
-                                metrics.pageWidthPt
-                            );
+                            const rule = row.ruleJson || row.rule_json;
+                            const layout = extractLayoutFromScenario(rule, metrics.pageWidthPt);
                             if (layout.columnCenters?.length >= 2) {
                                 similarScenarioCentersNorm = centersToNorm(
                                     layout.columnCenters,
                                     metrics.pageWidthPt
                                 );
                                 similarScenarioName = row.name || parseSc.scenarioName;
+                                similarScenarioHeaders = layout.headers?.length ? layout.headers : null;
+                                similarScenarioDataStartRow =
+                                    layout.pageDataStartRow != null ? layout.pageDataStartRow : null;
+                                similarScenarioHeaderFields = rule.header_fields?.length
+                                    ? rule.header_fields
+                                    : null;
                             }
                         }
                     }
@@ -170,12 +343,21 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
                     yNorm: it.y / metrics.pageHeightPt,
                 })),
                 rowCount: rows.length,
-                autoColumnCenters: grid.meta?.columnCenters || [],
+                clusteredRows,
+                suggestedDataStartRow,
+                suggestedHeaderFields,
+                suggestedHeaderFieldValues,
+                autoColumnCenters: autoCentersRaw,
                 autoColumnCentersNorm: autoNorm,
+                headerColumnLeftsNorm,
+                columnBoundaryNorm,
                 similarScenarioCentersNorm,
                 similarScenarioName,
-                headers: grid.headers || [],
-                previewRows: (grid.rows || []).slice(0, 30),
+                similarScenarioHeaders,
+                similarScenarioDataStartRow,
+                similarScenarioHeaderFields,
+                headers: previewHeadersOut,
+                previewRows: previewRowsOut,
                 confidence: grid.confidence || 0,
                 diagnostics: diagnoseGridExtract(grid, grid.headers?.length),
                 structuralFp: buildStructuralFingerprint({
@@ -192,11 +374,43 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
         }
     });
 
-    router.post('/pdf-grid-extract', memUpload.single('file'), async (req, res) => {
+    router.post('/pdf-header-fields-preview', memUploadAny, async (req, res) => {
         try {
-            const file = req.file;
+            const file = resolvePdfBufferFromRequest(req);
             if (!file?.buffer?.length) {
-                return res.status(400).json({ error: 'Нужен PDF в поле file' });
+                return res.status(400).json({ error: 'Нужен PDF в поле file или inbox_path + chat_session_id' });
+            }
+            const page = parseInt(req.body?.page || '1', 10) || 1;
+            const pageDataStart =
+                req.body?.data_start != null
+                    ? parseInt(req.body.data_start, 10)
+                    : undefined;
+            const headerFieldDefs = parseHeaderFieldsFromBody(req.body);
+            if (!headerFieldDefs.length) {
+                return res.status(400).json({ error: 'header_fields обязателен' });
+            }
+            const hfCheck = validateHeaderFieldDefs(headerFieldDefs);
+            if (!hfCheck.ok) {
+                return res.status(400).json({ error: hfCheck.errors.join('; ') });
+            }
+            const { items } = await extractTextItems(file.buffer, [page]);
+            const clustered = clusterRows(items);
+            const dataStart =
+                pageDataStart != null && Number.isFinite(pageDataStart)
+                    ? pageDataStart
+                    : suggestDataStartRow(clustered);
+            const values = extractHeaderFields(clustered, dataStart, headerFieldDefs);
+            res.json({ ok: true, values, dataStartRow: dataStart });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    router.post('/pdf-grid-extract', memUploadAny, async (req, res) => {
+        try {
+            const file = resolvePdfBufferFromRequest(req);
+            if (!file?.buffer?.length) {
+                return res.status(400).json({ error: 'Нужен PDF в поле file или inbox_path + chat_session_id' });
             }
 
             let columnCentersNorm = [];
@@ -209,17 +423,24 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
                 return res.status(400).json({ error: 'Нужно минимум 2 колонки' });
             }
 
-            const metrics = await getPdfPageMetrics(file.buffer, 1);
+            const page = parseInt(req.body?.page || '1', 10) || 1;
+            const metrics = await getPdfPageMetrics(file.buffer, page);
             const columnCenters = centersFromNorm(columnCentersNorm, metrics.pageWidthPt);
             const xTol = xTolFromNorm(parseFloat(req.body?.x_tol_norm || '0.02'), metrics.pageWidthPt);
-            const dataStart = req.body?.data_start != null ? parseInt(req.body.data_start, 10) : undefined;
+            const pageDataStart =
+                req.body?.data_start != null ? parseInt(req.body.data_start, 10) : undefined;
+            const gridDataStart =
+                pageDataStart != null && Number.isFinite(pageDataStart)
+                    ? pageDataStartToGridDataStart(pageDataStart, 0)
+                    : undefined;
 
             const gridOpts = {
                 columnCenters,
                 xTol,
-                dataStart,
+                dataStart: gridDataStart,
                 method: 'pdfjs_grid_manual',
                 sectionId: req.body?.section_id || undefined,
+                pageRanges: [page],
             };
             if (req.body?.section_start) gridOpts.anchorStart = req.body.section_start;
             if (req.body?.section_end) gridOpts.anchorEnd = req.body.section_end;
@@ -235,14 +456,37 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
             const grid = await extractTableGridFromPdf(file.buffer, gridOpts);
             const diagnostics = diagnoseGridExtract(grid, columnCentersNorm.length);
 
+            const headerFieldDefs = parseHeaderFieldsFromBody(req.body);
+            let outHeaders = grid.headers || [];
+            let outRows = grid.rows || [];
+            let headerFieldValues = {};
+            if (headerFieldDefs.length) {
+                const { items } = await extractTextItems(file.buffer, [page]);
+                const clustered = clusterRows(items);
+                const pageStart =
+                    pageDataStart != null && Number.isFinite(pageDataStart)
+                        ? pageDataStart
+                        : suggestDataStartRow(clustered);
+                headerFieldValues = extractHeaderFields(clustered, pageStart, headerFieldDefs);
+                const applied = applyHeaderFieldsToRows(
+                    outRows,
+                    outHeaders,
+                    headerFieldValues,
+                    headerFieldDefs
+                );
+                outHeaders = applied.headers;
+                outRows = applied.rows;
+            }
+
             res.json({
                 ok: grid.ok,
-                headers: grid.headers,
-                rows: grid.rows,
-                rowCount: grid.rows?.length || 0,
+                headers: outHeaders,
+                rows: outRows,
+                rowCount: outRows.length,
                 confidence: diagnostics.confidence,
                 diagnostics,
                 meta: grid.meta,
+                headerFieldValues,
             });
         } catch (err) {
             res.status(500).json({ error: err.message });
@@ -251,12 +495,12 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
 
     router.post('/pdf-parse-scenarios/from-extract', async (req, res) => {
         const {
-            project_id,
             name,
             doc_kind,
             broker_subtype,
             section_id,
             description,
+            tags,
             page_width_pt,
             column_centers_norm,
             headers,
@@ -267,6 +511,10 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
             section_start,
             section_end,
             expected_row_count,
+            header_fields,
+            probe_header_sample,
+            text_snippet,
+            filename,
         } = req.body || {};
 
         if (!name || !Array.isArray(column_centers_norm) || column_centers_norm.length < 2) {
@@ -277,6 +525,46 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
         const pageW = Number(page_width_pt) || 595.28;
         const centers = centersFromNorm(column_centers_norm, pageW);
 
+        const headerFieldDefs = Array.isArray(header_fields) ? header_fields : [];
+        if (headerFieldDefs.length) {
+            const hfCheck = validateHeaderFieldDefs(headerFieldDefs);
+            if (!hfCheck.ok) {
+                return res.status(400).json({ error: hfCheck.errors.join('; ') });
+            }
+        }
+
+        const probeHeaders = Array.isArray(probe_header_sample)
+            ? probe_header_sample.filter(Boolean).slice(0, 3)
+            : hdrs.slice(0, 3);
+        const finalMarkers = ensureMinMarkers(markers, text_snippet || '', {
+            headers: probeHeaders,
+            filename,
+        });
+        if (finalMarkers.length < 2) {
+            return res.status(400).json({
+                error: 'Нужно минимум 2 detection marker — добавь ключевые слова из текста PDF',
+            });
+        }
+
+        const structuralFpAtSave = buildStructuralFingerprint({
+            docKind: doc_kind || 'unknown',
+            brokerSubtype: broker_subtype || null,
+            sectionId: section_id || null,
+            columnCount: hdrs.length,
+            pageWidthPt: pageW,
+            headerSample: probeHeaders,
+        });
+
+        const tagList = Array.isArray(tags)
+            ? tags.map((t) => String(t || '').trim()).filter(Boolean).slice(0, 12)
+            : typeof tags === 'string'
+              ? tags
+                    .split(/[,;]+/)
+                    .map((t) => t.trim())
+                    .filter(Boolean)
+                    .slice(0, 12)
+              : [];
+
         const rule = {
             rule_schema_version: 3,
             meta: {
@@ -286,10 +574,18 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
                 broker_subtype: broker_subtype || null,
                 section_id: section_id || null,
                 description: description || '',
+                tags: tagList,
             },
             detection: {
-                markers: Array.isArray(markers) ? markers : [],
+                markers: finalMarkers,
                 min_marker_hits: 1,
+                probe_at_save: {
+                    structural_fp: structuralFpAtSave,
+                    header_sample: probeHeaders,
+                    column_count: hdrs.length,
+                    text_snippet: String(text_snippet || '').slice(0, 500),
+                    filename_pattern: filename ? String(filename).slice(0, 120) : null,
+                },
             },
             layout: {
                 engine: 'pdfjs_grid',
@@ -301,6 +597,7 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
                 x_tol_norm: Number(x_tol_norm) || 0.02,
             },
             columns: buildColumnsFromExtract(hdrs, centers, pageW),
+            ...(headerFieldDefs.length ? { header_fields: headerFieldDefs } : {}),
             validation: {
                 expected_column_count: hdrs.length,
                 expected_row_count: expected_row_count ?? null,
@@ -309,33 +606,44 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
 
         try {
             const saved = await savePdfParseScenario(pool, {
-                projectId: project_id,
                 rule,
                 status: 'active',
             });
             if (!saved.ok) return res.status(400).json({ error: saved.errors.join('; ') });
+            console.log(
+                `[pdf-scenario] saved id=${saved.scenario?.id} name=${JSON.stringify(saved.scenario?.name)} markers=${(rule.detection?.markers || []).length}`
+            );
             res.json({ scenario: saved.scenario });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
     });
 
-    router.post('/pdf-parse-confirm', memUpload.single('file'), async (req, res) => {
+    registerPdfParseConfirmRoute(router, '/pdf-parse-confirm', memUploadAny, {
+        pool,
+        maybeLinkSnapshotToChat,
+    });
+    registerPdfParseConfirmRoute(router, '/pdf-parse-scenarios/confirm', memUploadAny, {
+        pool,
+        maybeLinkSnapshotToChat,
+    });
+    router.post('/pdf-parse-scenarios/confirm-draft', async (req, res) => {
         try {
-            const file = req.file;
+            const file = resolvePdfBufferFromJsonBody(req) || resolvePdfBufferFromRequest(req);
             if (!file?.buffer?.length) {
-                return res.status(400).json({ error: 'Нужен PDF в поле file' });
+                return res.status(400).json({
+                    error: 'Нужен inbox_path + chat_session_id (или file в multipart)',
+                });
             }
             let headers = [];
             let rows = [];
             try {
-                headers = JSON.parse(req.body?.headers || '[]');
-                rows = JSON.parse(req.body?.rows || '[]');
+                ({ headers, rows } = parseHeadersRowsFromBody(req.body));
             } catch {
                 return res.status(400).json({ error: 'headers и rows должны быть JSON' });
             }
             const result = await confirmPdfDraft(pool, {
-                file,
+                file: { buffer: file.buffer, originalname: file.originalname || 'file.pdf' },
                 projectId: req.body?.project_id || req.body?.projectId || null,
                 scenarioId: req.body?.scenario_id || req.body?.scenarioId || 'pdf_extracted',
                 headers,
@@ -344,6 +652,15 @@ function registerPdfParseScenarioRoutes(router, { pool }) {
             });
             if (!result.ok) {
                 return res.status(400).json({ error: (result.errors || ['Ошибка confirm']).join('; ') });
+            }
+            const chatSessionId = parseInt(req.body?.chat_session_id || req.body?.chatSessionId || '', 10);
+            if (maybeLinkSnapshotToChat && Number.isFinite(chatSessionId) && chatSessionId > 0 && result.snapshotId) {
+                await maybeLinkSnapshotToChat({
+                    chatSessionId,
+                    snapshotId: result.snapshotId,
+                    projectId: req.body?.project_id || req.body?.projectId || null,
+                    label: file.originalname || 'PDF',
+                });
             }
             res.json(result);
         } catch (err) {

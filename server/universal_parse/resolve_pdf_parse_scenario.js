@@ -2,14 +2,23 @@ const {
     buildStructuralFingerprint,
     scoreScenarioMatch,
     matchStatusFromScore,
+    isScenarioAutoApplicable,
     getPdfPageMetrics,
 } = require('./pdf_structural_fingerprint');
 const {
     listPdfParseScenarios,
     findByStructuralFp,
     bumpPdfParseScenarioHit,
+    getPdfParseScenarioById,
 } = require('./pdf_parse_scenario_store');
+const { pickPdfScenarioWithLlm } = require('./pdf_scenario_llm_picker');
 const { extractLayoutFromScenario } = require('./pdf_parse_scenario_coords');
+const { pageDataStartToGridDataStart } = require('./pdf_grid_preview_utils');
+const {
+    extractHeaderFields,
+    applyHeaderFieldsToRows,
+    normalizeHeaderFieldDefs,
+} = require('./pdf_header_fields');
 const {
     extractTextItems,
     clusterRows,
@@ -41,26 +50,27 @@ async function probeGridSignals(buffer, { sectionId, pdfProbe } = {}) {
 
     let columnCount = 0;
     let headerSample = [];
+    let columnCentersNorm = [];
     let gridConfidence = 0;
 
     try {
         const sectionDef = sectionId ? SECTION_DEFS.find((d) => d.id === sectionId) : null;
+        let grid;
         if (sectionDef) {
-            const grid = await extractTableGridFromPdf(buffer, {
+            grid = await extractTableGridFromPdf(buffer, {
                 anchorStart: sectionDef.patterns[0],
                 sectionId,
             });
-            if (grid.ok) {
-                columnCount = grid.headers?.length || 0;
-                headerSample = (grid.headers || []).slice(0, 3);
-                gridConfidence = grid.confidence || 0;
-            }
         } else {
-            const grid = await extractTableGridFromPdf(buffer);
-            if (grid.ok) {
-                columnCount = grid.headers?.length || 0;
-                headerSample = (grid.headers || []).slice(0, 3);
-                gridConfidence = grid.confidence || 0;
+            grid = await extractTableGridFromPdf(buffer);
+        }
+        if (grid?.ok) {
+            columnCount = grid.headers?.length || 0;
+            headerSample = (grid.headers || []).slice(0, 3);
+            gridConfidence = grid.confidence || 0;
+            const centers = grid.meta?.columnCenters || [];
+            if (centers.length && pageWidthPt > 0) {
+                columnCentersNorm = centers.map((x) => Number(x) / pageWidthPt);
             }
         }
     } catch {
@@ -87,10 +97,48 @@ async function probeGridSignals(buffer, { sectionId, pdfProbe } = {}) {
         sectionId: sectionId || null,
         columnCount,
         headerSample,
+        columnCentersNorm,
         pageWidthPt,
         pageHeightPt,
         structuralFp,
         gridConfidence,
+    };
+}
+
+/** Короткий tabular PDF — grid есть, но мало текстовых строк. */
+function hasTabularGridLayout(signals) {
+    return (
+        Number(signals?.columnCount || 0) >= 2 &&
+        (Number(signals?.gridConfidence || 0) > 0 || (signals?.columnCentersNorm?.length || 0) >= 2)
+    );
+}
+
+function buildParseScenarioPayload({
+    status,
+    best,
+    candidates,
+    signals,
+    llmSuggestion = null,
+}) {
+    return {
+        status,
+        scenarioId: status === 'found' || status === 'similar' ? best?.id ?? null : null,
+        scenarioName: best?.name || null,
+        matchScore: best?.matchScore ?? 0,
+        candidates: candidates.map((c) => ({
+            id: c.id,
+            name: c.name,
+            matchScore: c.matchScore,
+            version: c.version,
+            autoApply: c.autoApply,
+            markerHits: c.markerHits,
+        })),
+        llmSuggestion,
+        signals: {
+            structuralFp: signals.structuralFp,
+            columnCount: signals.columnCount,
+            pageWidthPt: signals.pageWidthPt,
+        },
     };
 }
 
@@ -129,17 +177,61 @@ async function resolvePdfParseScenario(pool, buffer, pdfProbe, options = {}) {
         pdfProbe,
     });
 
+    const forceId =
+        options.forceScenarioId != null
+            ? parseInt(options.forceScenarioId, 10)
+            : null;
+    if (pool && Number.isFinite(forceId) && forceId > 0) {
+        const forced = await getPdfParseScenarioById(pool, forceId);
+        if (forced) {
+            const scored = scoreScenarioMatch(signals, forced);
+            const candidate = {
+                id: forced.id,
+                name: forced.name,
+                version: forced.version,
+                structuralFp: forced.structuralFp,
+                docKind: forced.docKind,
+                brokerSubtype: forced.brokerSubtype,
+                sectionId: forced.sectionId,
+                matchScore: Math.max(scored.score, 0.95),
+                autoApply: true,
+                markerHits: scored.markerHits,
+                ruleJson: forced.ruleJson,
+            };
+            try {
+                await bumpPdfParseScenarioHit(pool, forced.id);
+            } catch {
+                /* non-fatal */
+            }
+            return {
+                catalogScenarioId,
+                catalogConfidence: pdfProbe?.confidence ?? 0.5,
+                parseScenario: buildParseScenarioPayload({
+                    status: 'found',
+                    best: candidate,
+                    candidates: [candidate],
+                    signals,
+                }),
+                bestScenario: candidate,
+                gridSignals: signals,
+            };
+        }
+    }
+
+    const looseKind =
+        !signals.docKind ||
+        signals.docKind === 'unknown' ||
+        Boolean(pdfProbe?.ambiguous);
+
     let candidates = [];
     if (pool) {
         try {
-            const exact = await findByStructuralFp(pool, signals.structuralFp, {
-                projectId: options.projectId,
-            });
+            const exact = await findByStructuralFp(pool, signals.structuralFp);
             const listed = await listPdfParseScenarios(pool, {
-                projectId: options.projectId,
                 docKind: signals.docKind,
                 brokerSubtype: signals.brokerSubtype,
                 sectionId: signals.sectionId,
+                looseDocKind: looseKind,
             });
 
             const seen = new Set();
@@ -148,6 +240,7 @@ async function resolvePdfParseScenario(pool, buffer, pdfProbe, options = {}) {
                 if (!row || seen.has(row.id)) continue;
                 seen.add(row.id);
                 const scored = scoreScenarioMatch(signals, row);
+                const autoApply = isScenarioAutoApplicable(scored, row);
                 merged.push({
                     id: row.id,
                     name: row.name,
@@ -157,6 +250,8 @@ async function resolvePdfParseScenario(pool, buffer, pdfProbe, options = {}) {
                     brokerSubtype: row.brokerSubtype,
                     sectionId: row.sectionId,
                     matchScore: scored.score,
+                    autoApply,
+                    markerHits: scored.markerHits,
                     ruleJson: row.ruleJson,
                 });
             }
@@ -171,10 +266,38 @@ async function resolvePdfParseScenario(pool, buffer, pdfProbe, options = {}) {
         }
     }
 
-    const best = candidates[0] || null;
-    const status = best ? matchStatusFromScore(best.matchScore) : 'missing';
+    let best = candidates[0] || null;
+    let llmSuggestion = null;
 
-    if (status === 'found' && best && pool) {
+    const llmPick = await pickPdfScenarioWithLlm({
+        fileSignals: signals,
+        candidates,
+        pdfProbe,
+        fileName: options.fileName || '',
+    });
+    if (llmPick) {
+        llmSuggestion = llmPick;
+        if (
+            llmPick.chosenScenarioId &&
+            llmPick.confidence >= 0.7 &&
+            !llmPick.askUser
+        ) {
+            const chosen = candidates.find((c) => c.id === llmPick.chosenScenarioId);
+            if (chosen) {
+                best = { ...chosen, matchScore: Math.max(chosen.matchScore, llmPick.confidence), autoApply: true };
+            }
+        }
+    }
+
+    const status = best
+        ? best.autoApply
+            ? best.matchScore >= 0.85 || (llmSuggestion?.confidence >= 0.7 && llmSuggestion?.chosenScenarioId === best.id)
+                ? 'found'
+                : 'similar'
+            : matchStatusFromScore(best.matchScore)
+        : 'missing';
+
+    if ((status === 'found' || status === 'similar') && best?.autoApply && pool) {
         try {
             await bumpPdfParseScenarioHit(pool, best.id);
         } catch {
@@ -185,24 +308,14 @@ async function resolvePdfParseScenario(pool, buffer, pdfProbe, options = {}) {
     return {
         catalogScenarioId,
         catalogConfidence: pdfProbe?.confidence ?? 0.5,
-        parseScenario: {
+        parseScenario: buildParseScenarioPayload({
             status,
-            scenarioId: status === 'found' ? best.id : null,
-            scenarioName: best?.name || null,
-            matchScore: best?.matchScore ?? 0,
-            candidates: candidates.map((c) => ({
-                id: c.id,
-                name: c.name,
-                matchScore: c.matchScore,
-                version: c.version,
-            })),
-            signals: {
-                structuralFp: signals.structuralFp,
-                columnCount: signals.columnCount,
-                pageWidthPt: signals.pageWidthPt,
-            },
-        },
-        bestScenario: status === 'found' ? best : null,
+            best,
+            candidates,
+            signals,
+            llmSuggestion,
+        }),
+        bestScenario: status === 'found' || status === 'similar' ? best : null,
         gridSignals: signals,
     };
 }
@@ -220,49 +333,83 @@ async function extractWithPdfParseScenario(scenarioRow, buffer, options = {}) {
     const layout = extractLayoutFromScenario(rule, options.pageWidthPt);
     const sectionStart = rule.layout?.section_start?.pattern;
     const sectionEnd = rule.layout?.section_end?.pattern;
+    const pageDataStartRow = layout.pageDataStartRow;
 
     const gridOpts = {
         columnCenters: layout.columnCenters,
         cachedHeaders: layout.headers,
-        dataStart: layout.dataStart,
         xTol: layout.xTol,
         method: 'pdfjs_grid_scenario_v3',
         sectionId: rule.meta?.section_id || options.sectionId,
         visionHeaders: layout.headers,
+        skipMultiCandidate: true,
     };
 
+    let result;
     if (sectionStart) {
-        return extractTableGridFromPdf(buffer, {
+        const { items } = await extractTextItems(buffer);
+        const rows = clusterRows(items);
+        const re = new RegExp(sectionStart, 'i');
+        const startIdx = findSectionRowIndex(rows, [re]);
+        const gridDataStart =
+            pageDataStartRow != null && startIdx >= 0
+                ? pageDataStartToGridDataStart(pageDataStartRow, startIdx)
+                : undefined;
+        result = await extractTableGridFromPdf(buffer, {
             anchorStart: sectionStart,
             anchorEnd: sectionEnd || undefined,
             ...gridOpts,
+            dataStart: gridDataStart,
+        });
+    } else {
+        const { items } = await extractTextItems(buffer);
+        const rows = clusterRows(items);
+        let startIdx = 0;
+        let endIdx = rows.length;
+        if (sectionEnd) {
+            const re = new RegExp(sectionEnd, 'i');
+            for (let i = startIdx + 1; i < rows.length; i++) {
+                if (re.test(rows[i].text)) {
+                    endIdx = i;
+                    break;
+                }
+            }
+        }
+        const gridDataStart =
+            pageDataStartRow != null
+                ? pageDataStartToGridDataStart(pageDataStartRow, startIdx)
+                : undefined;
+        result = extractTableFromRows(rows, startIdx, endIdx, {
+            ...gridOpts,
+            dataStart: gridDataStart,
         });
     }
 
-    const { items } = await extractTextItems(buffer);
-    const rows = clusterRows(items);
-    let startIdx = 0;
-    let endIdx = rows.length;
-    if (sectionStart) {
-        const re = new RegExp(sectionStart, 'i');
-        startIdx = findSectionRowIndex(rows, [re]);
-        if (startIdx < 0) return { ok: false, headers: [], rows: [], confidence: 0 };
+    const headerFieldDefs = normalizeHeaderFieldDefs(rule.header_fields);
+    if (headerFieldDefs.length && result?.rows?.length) {
+        const { items } = await extractTextItems(buffer);
+        const clustered = clusterRows(items);
+        const values = extractHeaderFields(
+            clustered,
+            pageDataStartRow ?? clustered.length,
+            headerFieldDefs
+        );
+        const applied = applyHeaderFieldsToRows(
+            result.rows,
+            result.headers,
+            values,
+            headerFieldDefs
+        );
+        result = { ...result, headers: applied.headers, rows: applied.rows };
     }
-    if (sectionEnd) {
-        const re = new RegExp(sectionEnd, 'i');
-        for (let i = startIdx + 1; i < rows.length; i++) {
-            if (re.test(rows[i].text)) {
-                endIdx = i;
-                break;
-            }
-        }
-    }
-    return extractTableFromRows(rows, startIdx, endIdx, gridOpts);
+
+    return result;
 }
 
 module.exports = {
     isBuiltinPdfKind,
     probeGridSignals,
+    hasTabularGridLayout,
     resolvePdfParseScenario,
     extractWithPdfParseScenario,
 };

@@ -57,6 +57,13 @@ const migrate = async () => {
         await pool.query(PDF_PARSE_SCENARIOS_DDL);
         console.log('Таблица pdf_parse_scenarios проверена/создана.');
 
+        const migrated = await pool.query(
+            `UPDATE pdf_parse_scenarios SET project_id = NULL WHERE project_id IS NOT NULL RETURNING id`
+        );
+        if (migrated.rowCount > 0) {
+            console.log(`PDF-сценарии: сброшен project_id у ${migrated.rowCount} записей (глобальная библиотека).`);
+        }
+
         await pool.query(`
             ALTER TABLE table_operations
             ADD COLUMN IF NOT EXISTS rollback_payload JSONB;

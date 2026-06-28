@@ -21,7 +21,7 @@ const {
 } = require('./pdf_broker_sections');
 const { createParseSnapshotStore } = require('../parse_snapshot_store');
 const { shouldDelegateToOpifDepo } = require('../pdf_probe');
-const { resolvePdfParseScenario, extractWithPdfParseScenario } = require('./resolve_pdf_parse_scenario');
+const { resolvePdfParseScenario, extractWithPdfParseScenario, hasTabularGridLayout } = require('./resolve_pdf_parse_scenario');
 const { diagnoseGridExtract } = require('./pdf_grid_diagnostics');
 const { buildPdfParseValidationReport } = require('../pdf_parse_validation_report');
 const { comparePdfDualExtract } = require('./pdf_dual_extract');
@@ -31,6 +31,31 @@ const {
     GRID_MIN_CONFIDENCE,
     PDF_VALIDATION_STRICT,
 } = require('../confidence_thresholds');
+
+function pdfKindFromUserMessage(userMessage) {
+    const t = String(userMessage || '').toLowerCase();
+    if (/брокер|broker|брокерск/i.test(t)) return 'broker_report';
+    if (/депо|depo|выписк/i.test(t)) return 'depo';
+    if (/упд|upd/i.test(t)) return 'upd_ediweb';
+    return null;
+}
+
+function orchestratorAnswersForPdfProbe(probe, orchestratorAnswers = {}, userMessage = '') {
+    const answers = { ...(orchestratorAnswers || {}) };
+    const explicit = pdfKindFromUserMessage(userMessage);
+    if (explicit) {
+        return { ...answers, pick_pdf_kind: explicit, _pdfKindExplicit: true };
+    }
+    if (
+        probe?.pdfProbe?.ambiguous &&
+        answers.pick_pdf_kind &&
+        !answers._pdfKindExplicit
+    ) {
+        const { pick_pdf_kind, pdfKind, ...rest } = answers;
+        return rest;
+    }
+    return answers;
+}
 
 function applyForcedPdfKind(probe, orchestratorAnswers = {}) {
     const forced =
@@ -44,7 +69,7 @@ function applyForcedPdfKind(probe, orchestratorAnswers = {}) {
         kind: forced,
         ambiguous: false,
         confidence: Math.max(probe.pdfProbe.confidence || 0.5, 0.82),
-        userForcedKind: true,
+        userForcedKind: Boolean(orchestratorAnswers._pdfKindExplicit || orchestratorAnswers.pick_pdf_kind),
     };
     return {
         ...probe,
@@ -319,28 +344,82 @@ async function parseScanWithVision(ctx) {
 }
 
 async function tryVisionScanFallback(ctx) {
-    const { pool, file, projectId, probe, userMessage } = ctx;
+    const { pool, file, projectId, probe, userMessage, gridSignals } = ctx;
     if (!isDocumentScanEnabled()) return null;
     if (!userMessage?.trim()) return null;
+    if (hasTabularGridLayout(gridSignals)) return null;
+    if (probe.pdfProbe?.kind === 'broker_report' && isMachineReadablePdf(probe.pdfProbe)) {
+        return null;
+    }
     if (!isLikelyScanPdf(probe.pdfProbe) && !probe.pdfProbe?.isLikelyScan) return null;
 
-    return parseScanWithVision({
-        pool,
-        file,
-        projectId,
-        userMessage,
-        sourceKind: 'pdf',
-    });
+    try {
+        return await parseScanWithVision({
+            pool,
+            file,
+            projectId,
+            userMessage,
+            sourceKind: 'pdf',
+        });
+    } catch (err) {
+        console.warn('[vision-scan-fallback]', err?.message || err);
+        return null;
+    }
 }
 
 async function parsePdfUniversal(ctx) {
-    const { pool, file, projectId, probe, userMessage } = ctx;
-    const kind = probe.pdfProbe?.kind;
-    const confidence = probe.pdfProbe?.confidence ?? 0.5;
+    const { pool, file, projectId, probe: probeIn, userMessage, orchestratorAnswers } = ctx;
+    let probe = probeIn;
+    let kind = probe.pdfProbe?.kind;
+    let confidence = probe.pdfProbe?.confidence ?? 0.5;
+
+    let scenarioResolution = null;
+    let bestPdfScenario = null;
+    let gridSignalsCached = null;
+    const resolveOpts = {
+        sectionId: orchestratorAnswers?.section_id || null,
+        forceScenarioId:
+            orchestratorAnswers?.force_pdf_scenario_id ||
+            orchestratorAnswers?.forceScenarioId ||
+            null,
+        fileName: file.originalname || file.name || '',
+    };
+    if (pool && !probe.pdfProbe?.userForcedKind) {
+        try {
+            const resolved = await resolvePdfParseScenario(pool, file.buffer, probe.pdfProbe, resolveOpts);
+            gridSignalsCached = resolved.gridSignals;
+            scenarioResolution = {
+                catalogScenarioId: resolved.catalogScenarioId,
+                catalogConfidence: resolved.catalogConfidence,
+                parseScenario: resolved.parseScenario,
+            };
+            bestPdfScenario = resolved.bestScenario;
+            const ps = resolved.parseScenario;
+            const scenarioApplies =
+                (ps?.status === 'found' || ps?.status === 'similar') && resolved.bestScenario;
+            if (probe.pdfProbe?.ambiguous && scenarioApplies) {
+                const forcedKind =
+                    resolved.bestScenario.docKind === 'broker_report'
+                        ? 'broker_report'
+                        : resolved.bestScenario.docKind || probe.pdfProbe.kind;
+                probe = applyForcedPdfKind(probe, { pick_pdf_kind: forcedKind });
+                kind = probe.pdfProbe.kind;
+                confidence = probe.pdfProbe.confidence ?? confidence;
+            }
+        } catch {
+            /* non-fatal */
+        }
+    }
+
+    const scenarioAppliesAfterResolve =
+        scenarioResolution?.parseScenario?.status === 'found' ||
+        scenarioResolution?.parseScenario?.status === 'similar';
 
     if (
         !probe.pdfProbe?.userForcedKind &&
-        (probe.pdfProbe?.ambiguous || (kind === 'unknown' && (probe.pdfProbe?.alternatives?.length || 0) >= 2))
+        !scenarioAppliesAfterResolve &&
+        (probe.pdfProbe?.ambiguous ||
+            (kind === 'unknown' && (probe.pdfProbe?.alternatives?.length || 0) >= 2))
     ) {
         return buildPdfAmbiguousResponse(probe, confidence);
     }
@@ -389,14 +468,12 @@ async function parsePdfUniversal(ctx) {
 
     const pdfScenarioId = kind === 'broker_report' ? 'broker_pdf' : 'pdf_extracted';
     const machineReadable = isMachineReadablePdf(probe.pdfProbe);
+    const useGridPath = machineReadable || hasTabularGridLayout(gridSignalsCached);
 
-    let scenarioResolution = null;
-    let bestPdfScenario = null;
-    if (machineReadable && pool) {
+    if (useGridPath && pool && !scenarioResolution) {
         try {
-            const resolved = await resolvePdfParseScenario(pool, file.buffer, probe.pdfProbe, {
-                projectId,
-            });
+            const resolved = await resolvePdfParseScenario(pool, file.buffer, probe.pdfProbe, resolveOpts);
+            gridSignalsCached = resolved.gridSignals || gridSignalsCached;
             scenarioResolution = {
                 catalogScenarioId: resolved.catalogScenarioId,
                 catalogConfidence: resolved.catalogConfidence,
@@ -508,7 +585,7 @@ async function parsePdfUniversal(ctx) {
         }
     }
 
-    if (machineReadable && kind !== 'broker_report') {
+    if (useGridPath) {
         let gridTable = null;
         if (bestPdfScenario) {
             gridTable = await extractWithPdfParseScenario(bestPdfScenario, file.buffer);
@@ -523,7 +600,9 @@ async function parsePdfUniversal(ctx) {
                 kind === 'broker_report'
                     ? comparePdfDualExtract(probe.lines || [], gridTable)
                     : null;
-            const savedScenarioFound = scenarioResolution?.parseScenario?.status === 'found';
+            const savedScenarioFound =
+                scenarioResolution?.parseScenario?.status === 'found' ||
+                scenarioResolution?.parseScenario?.status === 'similar';
             return finalizePdfTable(ctx, {
                 pool,
                 file,
@@ -618,7 +697,7 @@ async function parsePdfUniversal(ctx) {
     }
 
     // 2) Не машиночитаемый скан — vision-модель (после текстовых сценариев)
-    const scanResult = await tryVisionScanFallback(ctx);
+    const scanResult = await tryVisionScanFallback({ ...ctx, gridSignals: gridSignalsCached });
     if (scanResult) return scanResult;
 
     const isScan = isLikelyScanPdf(probe.pdfProbe) || probe.pdfProbe?.isLikelyScan;
@@ -628,7 +707,7 @@ async function parsePdfUniversal(ctx) {
         confidence: 0.3,
         layoutMeta: probe.layoutMeta,
         structurePack: probe.structurePack,
-        needsConfirm: true,
+        needsConfirm: isScan,
         engine: 'none',
         assistantMessage: isScan
             ? 'Похоже на скан без текстового слоя. Напиши в чате, какие поля вытащить — подключу vision-модель.'
@@ -651,7 +730,8 @@ async function parseUniversal(input) {
         sheetName,
         userMessage,
     });
-    probe = applyForcedPdfKind(probe, orchestratorAnswers || {});
+    const pdfAnswers = orchestratorAnswersForPdfProbe(probe, orchestratorAnswers || {}, userMessage);
+    probe = applyForcedPdfKind(probe, pdfAnswers);
 
     if (probe.sourceKind === 'excel') {
         const excelResult = await parseExcelUniversal({ pool, file, sheetName, projectId, probe });
@@ -681,7 +761,14 @@ async function parseUniversal(input) {
     }
 
     if (probe.sourceKind === 'pdf') {
-        return parsePdfUniversal({ pool, file, projectId, probe, userMessage });
+        return parsePdfUniversal({
+            pool,
+            file,
+            projectId,
+            probe,
+            userMessage,
+            orchestratorAnswers: pdfAnswers,
+        });
     }
 
     if (probe.sourceKind === 'image_scan') {
