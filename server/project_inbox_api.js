@@ -15,6 +15,7 @@ const {
     buildInboxTree,
     clearProjectInbox,
     deleteInboxPath,
+    readInboxFileBuffer,
 } = require('./project_inbox');
 const { loadInboxDescriptors } = require('./inbox_disk');
 const {
@@ -377,6 +378,7 @@ function registerInboxRoutes(router, { pool, snapshotStore, maybeLinkSnapshotToC
     }
 
     async function runChatInboxParse(req, res) {
+        const started = Date.now();
         const scope = chatScopeFromReq(req);
         const chat = await pool.query(`SELECT id, project_id FROM chat_sessions WHERE id = $1`, [
             scope.chatSessionId,
@@ -385,6 +387,9 @@ function registerInboxRoutes(router, { pool, snapshotStore, maybeLinkSnapshotToC
         const projectId = chat.rows[0].project_id;
 
         const userMessage = String(req.body.userMessage || '').trim();
+        console.log(
+            `[inbox-parse] start chat=${scope.chatSessionId} files=? msg=${userMessage.slice(0, 48)}`
+        );
         if (!userMessage) {
             return res.status(422).json({
                 error: 'Напиши задачу в чате перед парсом — там могут быть правила и сценарий.',
@@ -413,6 +418,14 @@ function registerInboxRoutes(router, { pool, snapshotStore, maybeLinkSnapshotToC
         const opifFromPath = isOpifScenario(scenarioId);
         const files = loadInboxDescriptors(entries, { withBuffer: !opifFromPath });
 
+        const finish = () => {
+            if (!res.headersSent) return;
+            console.log(
+                `[inbox-parse] done chat=${scope.chatSessionId} ms=${Date.now() - started} files=${entries.length}`
+            );
+        };
+        res.once('finish', finish);
+
         await runBatchStartFromUploads({
             files,
             targetFile: null,
@@ -430,6 +443,12 @@ function registerInboxRoutes(router, { pool, snapshotStore, maybeLinkSnapshotToC
             },
             res,
         });
+        if (!res.headersSent) {
+            console.warn(
+                `[inbox-parse] no-response chat=${scope.chatSessionId} ms=${Date.now() - started}`
+            );
+            res.status(500).json({ error: 'Парс не вернул ответ — попробуй ещё раз' });
+        }
     }
 
     router.get('/chats/:chatId/inbox/tree', async (req, res) => {
@@ -438,6 +457,28 @@ function registerInboxRoutes(router, { pool, snapshotStore, maybeLinkSnapshotToC
             const tree = buildInboxTree(scope);
             res.json({ ok: true, tree, chatSessionId: scope.chatSessionId });
         } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    router.get('/chats/:chatId/inbox/file', async (req, res) => {
+        try {
+            const relPath = String(req.query.path || '').trim();
+            if (!relPath) return res.status(400).json({ error: 'Нужен query path' });
+            const scope = chatScopeFromReq(req);
+            const loaded = readInboxFileBuffer(scope, null, relPath);
+            const buf = loaded.buffer;
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+            res.setHeader(
+                'Content-Disposition',
+                `inline; filename="${encodeURIComponent(loaded.originalname)}"`
+            );
+            res.send(buf);
+        } catch (err) {
+            if (/не найден/i.test(err.message)) {
+                return res.status(404).json({ error: err.message });
+            }
             res.status(500).json({ error: err.message });
         }
     });
