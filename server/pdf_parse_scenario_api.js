@@ -459,6 +459,7 @@ function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat 
             } catch {
                 headers = [];
             }
+            const headerFieldDefs = parseHeaderFieldsFromBody(req.body);
             const tableHeadersOnly = headerFieldDefs.length
                 ? headers.filter(
                       (h) => !headerFieldDefs.some((f) => f.label === h || f.target === h)
@@ -469,13 +470,11 @@ function registerPdfParseScenarioRoutes(router, { pool, maybeLinkSnapshotToChat 
             const grid = await extractTableGridFromPdf(file.buffer, gridOpts);
             const diagnostics = diagnoseGridExtract(grid, columnCentersNorm.length);
 
-            const headerFieldDefs = parseHeaderFieldsFromBody(req.body);
             let outHeaders = grid.headers || [];
             let outRows = grid.rows || [];
             let headerFieldValues = {};
             if (headerFieldDefs.length) {
-                const { items } = await extractTextItems(file.buffer, [page]);
-                const clustered = clusterRows(items);
+                const clustered = pageRows;
                 const pageStart =
                     pageDataStart != null && Number.isFinite(pageDataStart)
                         ? pageDataStart

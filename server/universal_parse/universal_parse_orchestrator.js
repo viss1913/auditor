@@ -587,11 +587,20 @@ async function parsePdfUniversal(ctx) {
 
     if (useGridPath) {
         let gridTable = null;
+        const autoGrid = await extractTableGridFromPdf(file.buffer);
         if (bestPdfScenario) {
-            gridTable = await extractWithPdfParseScenario(bestPdfScenario, file.buffer);
+            const scenarioGrid = await extractWithPdfParseScenario(bestPdfScenario, file.buffer);
+            const autoCols = autoGrid?.headers?.length || 0;
+            const scenCols = scenarioGrid?.headers?.length || 0;
+            const scenarioUsable =
+                scenarioGrid?.ok &&
+                scenarioGrid.rows?.length &&
+                isReasonableGridTable(scenarioGrid) &&
+                (autoCols < 2 || scenCols >= autoCols - 1);
+            gridTable = scenarioUsable ? scenarioGrid : autoGrid;
         }
         if (!gridTable?.ok || !gridTable?.rows?.length) {
-            gridTable = await extractTableGridFromPdf(file.buffer);
+            gridTable = autoGrid?.ok && autoGrid.rows?.length ? autoGrid : await extractTableGridFromPdf(file.buffer);
         }
         if (isReasonableGridTable(gridTable)) {
             const diagnostics = diagnoseGridExtract(gridTable, gridTable.headers?.length);
