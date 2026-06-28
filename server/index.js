@@ -15,9 +15,10 @@ console.log('[ENV PATH]', path1, '| DB_HOST:', process.env.DB_HOST);
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
 app.use((req, res, next) => {
-    if (String(req.url || '').includes('/inbox')) {
+    const url = String(req.url || '');
+    if (url.includes('/inbox') || url.includes('pdf-parse') || url.includes('pdf-grid')) {
         console.log(
-            `[http] ${req.method} ${req.url} origin=${req.headers.origin || '-'} len=${req.headers['content-length'] || '?'}`
+            `[http] ${req.method} ${url} origin=${req.headers.origin || '-'} len=${req.headers['content-length'] || '?'}`
         );
     }
     next();
@@ -89,6 +90,8 @@ const initDb = async () => {
         await pool.query(
             `ALTER TABLE parse_snapshots ADD COLUMN IF NOT EXISTS table_meta JSONB NOT NULL DEFAULT '{}'::jsonb;`
         );
+        const { PDF_PARSE_SCENARIOS_DDL } = require('./universal_parse/pdf_parse_scenario_store');
+        await pool.query(PDF_PARSE_SCENARIOS_DDL);
         const { ensureAuditorsSchema } = require('./auditor_schema');
         await ensureAuditorsSchema(pool);
         await ensureUsersSchema(pool);
